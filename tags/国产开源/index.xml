@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>国产开源 on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/%E5%9B%BD%E4%BA%A7%E5%BC%80%E6%BA%90/</link><description>Recent content in 国产开源 on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Fri, 15 Mar 2024 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/%E5%9B%BD%E4%BA%A7%E5%BC%80%E6%BA%90/index.xml" rel="self" type="application/rss+xml"/><item><title>HertzBeat 轻量监控告警：国人开源的一体化监控平台</title><link>https://liangweidonggood.github.io/p/hertzbeat-qing-liang-jian-kong-gao-jing/</link><pubDate>Fri, 15 Mar 2024 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/hertzbeat-qing-liang-jian-kong-gao-jing/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/hertzbeat-qing-liang-jian-kong-gao-jing/image/cover.jpg" alt="Featured image of post HertzBeat 轻量监控告警：国人开源的一体化监控平台" /&gt;&lt;p&gt;Prometheus + Grafana + alertmanager + node-exporter 一套拉完，少说 5 个容器、3 份配置、1 个 PromQL 学习成本。如果只是想&amp;quot;监控几十台机器 + 微信告警&amp;quot;，杀鸡用了牛刀。&lt;strong&gt;Dromara HertzBeat&lt;/strong&gt;（原 TanCloud）走另一条路——一个容器，监控 + 告警 + 可视化全打包，&lt;strong&gt;无 Agent 协议直采&lt;/strong&gt;（HTTP / SNMP / JDBC / SSH），连 exporter 都不用装。这篇文章讲清楚容器化部署、初始账号、监控模板、配置持久化。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;阅读对象&lt;/strong&gt;：中小团队想&amp;quot;快速搭一套能用&amp;quot;的监控体系、或者觉得 Prometheus 体系太重的同学&lt;br&gt;
+&lt;strong&gt;覆盖范围&lt;/strong&gt;：HertzBeat 1.x 容器化部署、初始账号、时区/中文环境、监控模板（Linux/MySQL/Redis/K8s/Windows/SNMP）、告警通知（钉钉/企微/飞书）&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="一为什么是-hertzbeat"&gt;一、为什么是 HertzBeat
+&lt;/h2&gt;&lt;p&gt;传统监控方案的痛点：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Prometheus 体系&lt;/strong&gt;：要装 N 个 exporter、PromQL 学习成本、告警要写规则、调仪表盘要懂 PromQL&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Zabbix&lt;/strong&gt;：重型、关系数据库后端、UI 古老、容器适配差&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;夜莺（Nightingale）&lt;/strong&gt;：国产不错但要分 Categraf + n9e + Transfer 多个组件&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Datadog / New Relic&lt;/strong&gt;：SaaS、按量计费、数据出境问题&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;HertzBeat 的设计哲学是&amp;quot;&lt;strong&gt;协议直采，零 Agent&lt;/strong&gt;&amp;quot;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;HTTP 协议&lt;/strong&gt;：网站、API、Spring Boot Actuator、K8s API&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;SNMP&lt;/strong&gt;：路由器、交换机、打印机&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;JDBC&lt;/strong&gt;：MySQL、PostgreSQL、Oracle、达梦、人大金仓&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;SSH&lt;/strong&gt;：执行命令采集（CPU/内存/磁盘）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;JMX&lt;/strong&gt;：JVM 应用&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Modbus / OPC-UA&lt;/strong&gt;：工业协议&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;一个 Jar 包搞定所有采集、可视化、告警、用户权限。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;When to use&lt;/strong&gt;：中小规模（&amp;lt; 200 监控对象）、要&amp;quot;快速上手&amp;quot;、团队不愿意学 PromQL、想用国产开源规避合规问题。规模再大（1000+ 节点、PB 级时序数据）还是建议回 Prometheus + VictoriaMetrics 体系。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="二容器化部署"&gt;二、容器化部署
+&lt;/h2&gt;&lt;h3 id="21-host-网络模式最简"&gt;2.1 host 网络模式（最简）
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -d --name hertzbeat &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --restart&lt;span class="o"&gt;=&lt;/span&gt;always &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --net&lt;span class="o"&gt;=&lt;/span&gt;host &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -e &lt;span class="nv"&gt;LANG&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;zh_CN.UTF-8 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -e &lt;span class="nv"&gt;TZ&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;Asia/Shanghai &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /home/docker/hertzbeat/data:/opt/hertzbeat/data &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; tancloud/hertzbeat
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;为什么用 host 网络&lt;/strong&gt;：HertzBeat 默认监听 1157 端口（Web）、反向连接 agent 时端口动态分配。host 模式省去端口映射的麻烦，也避免一些 SNMP/JMX 协议在 NAT 下的奇怪问题。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="22-端口映射模式"&gt;2.2 端口映射模式
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -d -p 1157:1157 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -e &lt;span class="nv"&gt;LANG&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;zh_CN.UTF-8 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -e &lt;span class="nv"&gt;TZ&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;Asia/Shanghai &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /opt/data:/opt/hertzbeat/data &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /opt/logs:/opt/hertzbeat/logs &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /opt/application.yml:/opt/hertzbeat/config/application.yml &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /opt/sureness.yml:/opt/hertzbeat/config/sureness.yml &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --restart&lt;span class="o"&gt;=&lt;/span&gt;always &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --name hertzbeat &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; tancloud/hertzbeat
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;挂载配置&lt;/strong&gt;：生产环境&lt;strong&gt;必须&lt;/strong&gt;把 &lt;code&gt;application.yml&lt;/code&gt;、&lt;code&gt;sureness.yml&lt;/code&gt; 挂出来，否则容器一升级配置就丢。HertzBeat 升级会清空容器内 &lt;code&gt;/opt/hertzbeat/data&lt;/code&gt; 之外的目录。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="23-初始账号"&gt;2.3 初始账号
+&lt;/h3&gt;&lt;p&gt;访问 &lt;code&gt;http://{{HOST}}:1157/passport/login&lt;/code&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;默认账号：&lt;code&gt;admin&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;默认密码：&lt;code&gt;hertzbeat&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;生产环境&lt;/strong&gt;：首次登录立即改密码，或在 &lt;code&gt;sureness.yml&lt;/code&gt; 里直接配置账号体系（HertzBeat 支持 RBAC 和 LDAP）。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="三添加监控对象"&gt;三、添加监控对象
+&lt;/h2&gt;&lt;p&gt;HertzBeat 把&amp;quot;采集什么&amp;quot;封装成&amp;quot;监控模板&amp;quot;——选模板、填 IP/端口/凭据、保存。&lt;/p&gt;
+&lt;h3 id="31-linux-主机监控ssh-协议"&gt;3.1 Linux 主机监控（SSH 协议）
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;监控 → 新建监控 → 选择模板：Linux&lt;/code&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;主机：填目标 IP&lt;/li&gt;
+&lt;li&gt;端口：22&lt;/li&gt;
+&lt;li&gt;用户名/密码：SSH 凭据&lt;/li&gt;
+&lt;li&gt;监控周期：60s（默认）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;保存后 HertzBeat 通过 SSH 上去 &lt;code&gt;cat /proc/stat&lt;/code&gt;、&lt;code&gt;free -m&lt;/code&gt;、&lt;code&gt;df -h&lt;/code&gt; 等命令采集指标。&lt;/p&gt;
+&lt;h3 id="32-mysql-监控jdbc-协议"&gt;3.2 MySQL 监控（JDBC 协议）
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;监控 → 新建监控 → 模板：Mysql&lt;/code&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;主机、端口、数据库、用户名、密码&lt;/li&gt;
+&lt;li&gt;监控指标：连接数、QPS、慢查询、InnoDB 缓冲池等&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="33-redis-监控"&gt;3.3 Redis 监控
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;监控 → 新建监控 → 模板：Redis&lt;/code&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;支持有密码和无密码两种连接方式&lt;/li&gt;
+&lt;li&gt;监控内存使用、连接数、命中率、Key 数量&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="34-kubernetes-监控"&gt;3.4 Kubernetes 监控
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;监控 → 新建监控 → 模板：Kubernetes&lt;/code&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;填 K8s API Server 地址 + ServiceAccount Token&lt;/li&gt;
+&lt;li&gt;自动发现 Pod、Deployment、Node 资源&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="35-网站监控http-协议"&gt;3.5 网站监控（HTTP 协议）
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;监控 → 新建监控 → 模板：HTTP_API&lt;/code&gt; 或 &lt;code&gt;网站监测&lt;/code&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;填 URL&lt;/li&gt;
+&lt;li&gt;选择 HTTP 方法、Header、断言（状态码、响应体关键字）&lt;/li&gt;
+&lt;li&gt;间隔时间和超时&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="36-snmp-监控"&gt;3.6 SNMP 监控
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;监控 → 新建监控 → 模板：SNMP&lt;/code&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;填目标 IP、SNMP community（默认 public）&lt;/li&gt;
+&lt;li&gt;OID 模板自动发现接口、流量&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;HertzBeat v1.6+ 模板生态&lt;/strong&gt;：官方维护 100+ 模板（Linux/Windows/MySQL/PostgreSQL/Redis/MongoDB/Elasticsearch/Kafka/ZK/Nginx/Apache/Docker/交换机/路由器/&amp;hellip;），基本覆盖了常见监控对象。社区也持续贡献新模板。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="四告警通知"&gt;四、告警通知
+&lt;/h2&gt;&lt;p&gt;HertzBeat 支持多种通知渠道（&lt;code&gt;告警 → 通知媒介&lt;/code&gt;）：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;渠道&lt;/th&gt;
+					&lt;th&gt;适用&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;钉钉机器人&lt;/td&gt;
+					&lt;td&gt;国内团队首选&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;企业微信机器人&lt;/td&gt;
+					&lt;td&gt;国内团队&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;飞书机器人&lt;/td&gt;
+					&lt;td&gt;字节系团队&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;Slack&lt;/td&gt;
+					&lt;td&gt;海外&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;邮件&lt;/td&gt;
+					&lt;td&gt;通用&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;Webhook&lt;/td&gt;
+					&lt;td&gt;自定义系统对接&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;Telegram / Discord&lt;/td&gt;
+					&lt;td&gt;海外&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3 id="钉钉告警示例"&gt;钉钉告警示例
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;告警 → 通知媒介 → 新增 → 钉钉机器人&lt;/code&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;名称：DingTalk-Alert&lt;/li&gt;
+&lt;li&gt;Webhook URL：&lt;code&gt;https://oapi.dingtalk.com/robot/send?access_token={{TOKEN}}&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;关键字：自定义&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;code&gt;告警 → 告警定义 → 新增规则&lt;/code&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;选择监控对象&lt;/li&gt;
+&lt;li&gt;指标：&lt;code&gt;cpu_usage&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;表达式：&lt;code&gt;cpu_usage &amp;gt; 80&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;持续时间：5 分钟&lt;/li&gt;
+&lt;li&gt;通知媒介：DingTalk-Alert&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;告警收敛&lt;/strong&gt;：HertzBeat 支持&amp;quot;标签路由 + 抑制规则&amp;quot;，避免同一时刻同一原因触发几十条告警。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="五可视化"&gt;五、可视化
+&lt;/h2&gt;&lt;p&gt;HertzBeat 内部集成了图表（基于 ECharts），可以：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;单个监控对象查看历史曲线（CPU、内存、磁盘、QPS 等）&lt;/li&gt;
+&lt;li&gt;多个监控对象叠到同一张图对比&lt;/li&gt;
+&lt;li&gt;创建 Dashboard 把常用图钉到首页&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;Grafana 不是 HertzBeat 的依赖&lt;/strong&gt;。HertzBeat 自己就有完整的可视化能力。如果团队已经在用 Grafana + Prometheus，HertzBeat 也可以通过 &lt;code&gt;/api/metrics&lt;/code&gt; 端点把数据暴露出去给 Prometheus 抓取（&amp;ldquo;反向对接&amp;rdquo;）。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="六踩坑清单"&gt;六、踩坑清单
+&lt;/h2&gt;&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;SSH 监控拿不到数据&lt;/strong&gt;——目标机器没装 &lt;code&gt;bc&lt;/code&gt; 命令（&lt;code&gt;cat /proc/loadavg&lt;/code&gt; 的格式化用到），或 &lt;code&gt;~/.bashrc&lt;/code&gt; 里有 prompt 输出&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;MySQL 监控 &amp;ldquo;Access denied&amp;rdquo;&lt;/strong&gt;——MySQL 8 默认 &lt;code&gt;caching_sha2_password&lt;/code&gt; 认证插件，HertzBeat 旧版本只支持 &lt;code&gt;mysql_native_password&lt;/code&gt;，要么改用户认证插件，要么升级 HertzBeat&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;SNMP 监控返回 timeout&lt;/strong&gt;——目标设备防火墙/ACL 拦截了 UDP 161，或者 community 不对&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;数据目录丢失&lt;/strong&gt;——升级前没挂载 &lt;code&gt;/opt/hertzbeat/data&lt;/code&gt;，容器销毁后所有监控配置清零&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;告警收不到&lt;/strong&gt;——先在 &lt;code&gt;告警 → 告警中心&lt;/code&gt; 看历史告警有没有触发，再检查通知媒介的 webhook 是否能 curl 通&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;中文乱码&lt;/strong&gt;——&lt;code&gt;LANG=zh_CN.UTF-8&lt;/code&gt; 没设，或者容器内字体不全，加 &lt;code&gt;-v /usr/share/fonts:/usr/share/fonts:ro&lt;/code&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="七2024-视角补充"&gt;七、2024+ 视角补充
+&lt;/h2&gt;&lt;p&gt;本文写于 2024-03，2025-2026 期间 HertzBeat 关键演进：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;HertzBeat 1.7+ / 1.8+&lt;/strong&gt;：&lt;strong&gt;AI 异常检测&lt;/strong&gt;（内置时序异常识别）、&lt;strong&gt;智能告警降噪&lt;/strong&gt;（关联分析）、&lt;strong&gt;自研存储引擎 v2&lt;/strong&gt;——单机监控 1000+ 节点&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Cloud Native 化&lt;/strong&gt;：1.7+ 推出 &lt;strong&gt;HertzBeat Operator&lt;/strong&gt;（K8s Operator 模式），CRD 管理监控对象&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;告警通知生态完善&lt;/strong&gt;：1.8+ 内置 &lt;strong&gt;PagerDuty / Opsgenie / Slack / 钉钉 / 企微 / 飞书&lt;/strong&gt;——oncall 集成开箱即用&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;多语言 / 多协议&lt;/strong&gt;：1.8+ 模板数 200+（&lt;strong&gt;新增 Modbus / OPC-UA / IEC104&lt;/strong&gt; 工业协议——工控监控更专业）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;多租户 / 团队权限&lt;/strong&gt;：1.7+ RBAC 增强，从&amp;quot;全局管理员&amp;quot;到&amp;quot;组织 / 项目 / 视图&amp;quot;三级权限&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;时序数据库后端可选&lt;/strong&gt;：1.8+ 支持 &lt;strong&gt;VictoriaMetrics / InfluxDB / TDengine&lt;/strong&gt; 作为存储后端，不再绑定 H2 / 内置 TSDB&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;实战建议（2025-2026 视角）&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;中小规模 / 国产化&lt;/strong&gt; → HertzBeat 1.8+ 仍是首选（vs Prometheus 体系仍更轻量）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;大规模（1000+ 节点）&lt;/strong&gt; → 建议 &lt;strong&gt;HertzBeat + VictoriaMetrics&lt;/strong&gt; 组合&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;工控 / IoT 场景&lt;/strong&gt; → HertzBeat 1.8+ 工业协议完善，&lt;strong&gt;vs 传统 Zabbix 优势明显&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;K8s 集群&lt;/strong&gt; → 仍推荐 &lt;strong&gt;kube-prometheus-stack&lt;/strong&gt;（生态成熟度 HertzBeat 暂不如）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="八参考资料"&gt;八、参考资料
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;HertzBeat 官网：https://hertzbeat.com&lt;/li&gt;
+&lt;li&gt;文档中心：https://hertzbeat.com/docs/&lt;/li&gt;
+&lt;li&gt;GitHub 仓库：https://github.com/dromara/hertzbeat&lt;/li&gt;
+&lt;li&gt;模板中心：https://hertzbeat.com/docs/template&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="下一步"&gt;下一步
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;想做&amp;quot;日志监控&amp;quot;？→ &lt;a class="link" href="https://liangweidonggood.github.io/p/loki-promtail-ri-zhi-jia-gou/" &gt;Loki + Promtail 日志架构&lt;/a&gt; 一文&lt;/li&gt;
+&lt;li&gt;想要传统三件套？→ &lt;a class="link" href="https://liangweidonggood.github.io/p/prometheus-jian-kong-gao-jing-ti-xi/" &gt;Prometheus 监控告警体系&lt;/a&gt; 一文&lt;/li&gt;
+&lt;li&gt;想给团队搭可视化大屏？→ &lt;a class="link" href="https://liangweidonggood.github.io/p/grafana-ke-shi-hua-mian-ban-shi-zhan/" &gt;Grafana 可视化面板实战&lt;/a&gt; 一文&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>

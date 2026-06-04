@@ -1,0 +1,315 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>反思 on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/%E5%8F%8D%E6%80%9D/</link><description>Recent content in 反思 on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Sun, 15 Mar 2020 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/%E5%8F%8D%E6%80%9D/index.xml" rel="self" type="application/rss+xml"/><item><title>当数据量起来之后：一个老程序员的认知升级</title><link>https://liangweidonggood.github.io/p/shu-ju-liang-ren-zhi-sheng-ji/</link><pubDate>Sun, 15 Mar 2020 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/shu-ju-liang-ren-zhi-sheng-ji/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/shu-ju-liang-ren-zhi-sheng-ji/image/cover.jpg" alt="Featured image of post 当数据量起来之后：一个老程序员的认知升级" /&gt;&lt;h1 id="当数据量起来之后一个老程序员的认知升级"&gt;当数据量起来之后：一个老程序员的认知升级
+&lt;/h1&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;前置&lt;/strong&gt;：这篇写于 2020 年 3 月。我在某健康集团做健康管理平台，第一次面对&amp;quot;每天 80 万条健康数据、几百万条 Excel 导入&amp;quot;这种规模。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="为什么写这篇"&gt;为什么写这篇
+&lt;/h2&gt;&lt;p&gt;2019 年底，我从某跨境支付公司跳到某健康集团。前一家做的是日均几万订单的跨境支付，后一家做的是&lt;strong&gt;日均几十万次健康检查、几百万条报告数据&lt;/strong&gt;的健康平台。&lt;/p&gt;
+&lt;p&gt;我天真地以为，&lt;strong&gt;量变到质变只是性能调优&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;来了 3 个月，我被打脸了。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;数据量级一旦变了，思维方式必须变。&lt;/strong&gt; 写单机代码 10 年的经验，在百万级数据面前几乎要全部推翻重来。这篇随笔记录了我被打脸后，悟到的 &lt;strong&gt;4 个真实业务场景 + 5 条方法论 + 4 个常见坑&lt;/strong&gt;。&lt;/p&gt;
+&lt;h2 id="4-个经典业务场景"&gt;4 个经典业务场景
+&lt;/h2&gt;&lt;h3 id="场景-140-亿个-qq-号去重1gb-内存"&gt;场景 1：40 亿个 QQ 号去重，1GB 内存
+&lt;/h3&gt;&lt;p&gt;这是面试题里的&amp;quot;老八股&amp;quot;，但真要落地，&lt;strong&gt;思路和工程取舍完全不一样&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;直接上 &lt;code&gt;HashSet&amp;lt;Long&amp;gt;&lt;/code&gt;？ 40 亿 × 8 字节 = 32 GB，&lt;strong&gt;直接 OOM&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;核心思路&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Bitmap（位图）&lt;/strong&gt;：把&amp;quot;存数值&amp;quot;换成&amp;quot;存 1 个比特位&amp;quot;。43 亿个 bit = 512 MB，&lt;strong&gt;刚好装进 1GB 内存&lt;/strong&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;布隆过滤器（Bloom Filter）&lt;/strong&gt;：如果数据是字符串、不能直接转 long，用多个 hash 函数映射到固定大小的 bit 数组，&lt;strong&gt;有微小误判率但内存极省&lt;/strong&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;分桶 + 外排序&lt;/strong&gt;：如果内存连 512MB 都没有，按 &lt;code&gt;hash % 100&lt;/code&gt; 把数据分到 100 个小文件，&lt;strong&gt;单机顺序处理&lt;/strong&gt;。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;span class="lnt"&gt;9
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;// Bitmap 核心思想：用 1 个 bit 标记&amp;#34;在不在&amp;#34;&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;boolean&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;long&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;qq&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;index&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;qq&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;64&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 在哪个 long 里&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;position&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;qq&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;%&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;64&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 在该 long 的哪一位&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;long&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;mask&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;1L&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;lt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;position&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="n"&gt;bits&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="n"&gt;index&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;mask&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 已存在&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;bits&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="n"&gt;index&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;|=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;mask&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 标记&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;512 MB 内存，无误差，O(1) 查询。&lt;/strong&gt; 我当时看到这个解法的第一反应是——&amp;ldquo;我以前写的代码，全是 O(N) 的笨办法&amp;rdquo;。&lt;/p&gt;
+&lt;h3 id="场景-2百万级-excel-导入数据库"&gt;场景 2：百万级 Excel 导入数据库
+&lt;/h3&gt;&lt;p&gt;这个场景我踩过最大的坑——&lt;strong&gt;上来就用 &lt;code&gt;WorkbookFactory.create(file)&lt;/code&gt;，结果 100 万行 xlsx 内存直接爆掉&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;核心思路&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;流式解析&lt;/strong&gt;（EasyExcel / POI SAX 模式）：&lt;strong&gt;内存里只保留当前行&lt;/strong&gt;，永远不一次性加载。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;批处理 + 多线程&lt;/strong&gt;：每 2000 行一批，主线程解析，子线程批量写库。&lt;strong&gt;MySQL JDBC 一定要加 &lt;code&gt;rewriteBatchedStatements=true&lt;/code&gt;，否则不是真批处理&lt;/strong&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;二阶段校验&lt;/strong&gt;：本地校验（格式、长度） + DB 校验（外键是否存在）。&lt;strong&gt;不要在循环里查 DB，先批量拉一份到内存里比对&lt;/strong&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;失败策略&lt;/strong&gt;：别用大事务，&lt;strong&gt;用 TaskID 异步 + 错误行回写 &lt;code&gt;error.xlsx&lt;/code&gt;&lt;/strong&gt;。用户能下载、自己改、二次上传。&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;生产环境小贴士&lt;/strong&gt;：导入是 IO 密集型，线程数可以开大（&lt;code&gt;2 × CPU核数&lt;/code&gt;），但&lt;strong&gt;拒绝策略必须用 &lt;code&gt;CallerRunsPolicy&lt;/code&gt;&lt;/strong&gt;——队列满了让主线程亲自写，自动反压。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="场景-32gb-文件找出高频-top-100"&gt;场景 3：2GB 文件找出高频 Top 100
+&lt;/h3&gt;&lt;p&gt;一开始我用 &lt;code&gt;Files.readAllLines()&lt;/code&gt;——直接把 2GB 文件读成字符串列表，&lt;strong&gt;内存放大 3-5 倍直接 OOM&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;两个标准解法&lt;/strong&gt;：&lt;/p&gt;
+&lt;h4 id="解法-a流式读取--最小堆单机-4gb-内存场景"&gt;解法 A：流式读取 + 最小堆（单机 4GB 内存场景）
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;// 1. 流式读取 + 内存哈希计数&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;try&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;BufferedReader&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;reader&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;BufferedReader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;FileReader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;file&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;8&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;1024&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;1024&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 8MB Buffer&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;line&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;while&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="n"&gt;line&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;reader&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;readLine&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 增量更新 HashMap&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;wordCounts&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;put&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;word&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;wordCounts&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getOrDefault&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;word&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;0L&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;1&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;// 2. 最小堆拿 Top 100&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;PriorityQueue&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Map&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;Entry&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Long&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;minHeap&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;PriorityQueue&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;100&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Comparator&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;comparingLong&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Map&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;Entry&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;getValue&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;// 遍历完 map 之后，堆里留下的就是 Top 100&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="解法-b分治法百-gb-文件也能用"&gt;解法 B：分治法（百 GB 文件也能用）
+&lt;/h4&gt;&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;Hash 分流&lt;/strong&gt;：按 &lt;code&gt;hash(word) % 64&lt;/code&gt; 写 64 个小文件&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;局部 Top 100&lt;/strong&gt;：每个小文件独立算 Top 100&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;全局归并&lt;/strong&gt;：64 × 100 = 6400 个候选，再筛一次&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h4 id="解法-clinux-命令行降维打击"&gt;解法 C：Linux 命令行&amp;quot;降维打击&amp;quot;
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;cat large_file.txt &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="p"&gt;|&lt;/span&gt; tr -cs &lt;span class="s1"&gt;&amp;#39;a-zA-Z&amp;#39;&lt;/span&gt; &lt;span class="s1"&gt;&amp;#39;[\n*]&amp;#39;&lt;/span&gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="p"&gt;|&lt;/span&gt; tr &lt;span class="s1"&gt;&amp;#39;A-Z&amp;#39;&lt;/span&gt; &lt;span class="s1"&gt;&amp;#39;a-z&amp;#39;&lt;/span&gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="p"&gt;|&lt;/span&gt; sort &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="p"&gt;|&lt;/span&gt; uniq -c &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="p"&gt;|&lt;/span&gt; sort -nr &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="p"&gt;|&lt;/span&gt; head -n &lt;span class="m"&gt;100&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;5 个 &lt;code&gt;tr&lt;/code&gt;/&lt;code&gt;sort&lt;/code&gt;/&lt;code&gt;uniq&lt;/code&gt; 搞定，30 秒出结果。&lt;/strong&gt; Linux 工具链是 C 写的，性能比我写的 Java 还快。&lt;/p&gt;
+&lt;h3 id="场景-4给第三方提供接口"&gt;场景 4：给第三方提供接口
+&lt;/h3&gt;&lt;p&gt;我以前做内部系统，&lt;strong&gt;接口爱怎么写怎么写&lt;/strong&gt;。做对外接口才发现，光&amp;quot;防刷&amp;quot;就是个大工程。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;4 个必做项&lt;/strong&gt;：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;RESTful + 统一响应格式&lt;/strong&gt;：&lt;code&gt;{code, message, data}&lt;/code&gt; 三段式，错误码统一，&lt;strong&gt;优雅降级&lt;/strong&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;限流&lt;/strong&gt;：Redis + Lua 脚本实现&lt;strong&gt;原子化的分布式令牌桶&lt;/strong&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;设备指纹 + 请求签名&lt;/strong&gt;：防脚本 + 防伪造。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;结构化日志&lt;/strong&gt;：所有外部接口调用记日志，&lt;strong&gt;敏感信息过滤&lt;/strong&gt;（手机号、身份证打码）。&lt;/li&gt;
+&lt;/ol&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;最关键的&lt;/strong&gt;：&lt;strong&gt;接口契约先行&lt;/strong&gt;（YApi / OpenAPI），不要后端写完了再补文档。前后端联调周期能从一周压到一天。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="5-条方法论"&gt;5 条方法论
+&lt;/h2&gt;&lt;h3 id="方法论-1内存估算先行"&gt;方法论 1：内存估算先行
+&lt;/h3&gt;&lt;p&gt;写任何大数据代码前，&lt;strong&gt;先算一下&lt;/strong&gt;：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;场景&lt;/th&gt;
+					&lt;th&gt;数据量&lt;/th&gt;
+					&lt;th&gt;朴素方案&lt;/th&gt;
+					&lt;th&gt;优化方案&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;40 亿 QQ 号去重&lt;/td&gt;
+					&lt;td&gt;40 亿 long&lt;/td&gt;
+					&lt;td&gt;HashSet → 32 GB ❌&lt;/td&gt;
+					&lt;td&gt;Bitmap → 512 MB ✅&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;2GB 文本 Top 100&lt;/td&gt;
+					&lt;td&gt;200 万独立词&lt;/td&gt;
+					&lt;td&gt;readAllLines → 8GB+ ❌&lt;/td&gt;
+					&lt;td&gt;流式 + HashMap → 几百 MB ✅&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;百万行 Excel&lt;/td&gt;
+					&lt;td&gt;100 万行&lt;/td&gt;
+					&lt;td&gt;WorkbookFactory → OOM ❌&lt;/td&gt;
+					&lt;td&gt;EasyExcel SAX → 几 MB ✅&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;strong&gt;不算这一笔，后面所有优化都是瞎调。&lt;/strong&gt;&lt;/p&gt;
+&lt;h3 id="方法论-2流式--一次性加载"&gt;方法论 2：流式 &amp;gt; 一次性加载
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;这是大数据处理的&amp;quot;第一性原理&amp;quot;&lt;/strong&gt;。文件大到内存装不下，唯一的解法是&lt;strong&gt;分块流式处理&lt;/strong&gt;。EasyExcel、BufferedReader、Kafka Consumer、Log Tail，&lt;strong&gt;底层都是这个思想&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="方法论-3分治是万金油"&gt;方法论 3：分治是万金油
+&lt;/h3&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&amp;ldquo;凡是单机装不下的，就分桶；凡是单线程跑太慢的，就并行；凡是单点会挂的，就冗余。&amp;rdquo;&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;p&gt;&lt;strong&gt;MapReduce 是工业级模板&lt;/strong&gt;。40 亿 QQ 号去重能分桶，2GB 文件 Top 100 能分桶，&lt;strong&gt;百亿条日志分析也能分桶&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="方法论-4业务约束--技术最优"&gt;方法论 4：业务约束 &amp;gt; 技术最优
+&lt;/h3&gt;&lt;p&gt;我曾经追求过&amp;quot;性能 100% 压榨&amp;quot;，后来发现&lt;strong&gt;业务允许 1% 误判率时，内存能省 10 倍&lt;/strong&gt;。比如布隆过滤器。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;先问业务&amp;quot;我能不能接受 1% 误差？&amp;quot;，比问&amp;quot;用 Bloom 还是 Roaring&amp;quot;重要 10 倍。&lt;/strong&gt;&lt;/p&gt;
+&lt;h3 id="方法论-5批处理--异步--拒绝策略"&gt;方法论 5：批处理 + 异步 + 拒绝策略
+&lt;/h3&gt;&lt;p&gt;百万级导入、批量发通知、批量同步数据——三件套必须配套：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;批处理&lt;/strong&gt;：1000~5000 条一批&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;异步&lt;/strong&gt;：返回 TaskID，不阻塞用户&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;拒绝策略&lt;/strong&gt;：队列满了让上游等（&lt;code&gt;CallerRunsPolicy&lt;/code&gt;）或丢弃非关键任务&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="4-个常见坑"&gt;4 个常见坑
+&lt;/h2&gt;&lt;h3 id="坑-1误用分布式事务"&gt;坑 1：误用分布式事务
+&lt;/h3&gt;&lt;p&gt;百万级导入用分布式事务 → &lt;strong&gt;长事务锁表&lt;/strong&gt; → 整个库卡死。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;解法&lt;/strong&gt;：最终一致性 + 补偿 + 错误行回写。&lt;strong&gt;99% 的场景不需要分布式事务&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="坑-2mysql-伪批处理"&gt;坑 2：MySQL 伪批处理
+&lt;/h3&gt;&lt;p&gt;JDBC 写 &lt;code&gt;addBatch()&lt;/code&gt; 但没加 &lt;code&gt;rewriteBatchedStatements=true&lt;/code&gt;——&lt;strong&gt;还是一条条 insert&lt;/strong&gt;，性能比单条还慢。&lt;/p&gt;
+&lt;h3 id="坑-3hashmap-装下全部数据"&gt;坑 3：HashMap 装下&amp;quot;全部数据&amp;quot;
+&lt;/h3&gt;&lt;p&gt;我早期写的代码里，到处都是 &lt;code&gt;Map&amp;lt;userId, User&amp;gt;&lt;/code&gt; 全量缓存。&lt;strong&gt;几万用户没事，百万用户 OOM。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;解法&lt;/strong&gt;：本地缓存（Caffeine）+ 过期时间 + 最大条目数；分布式缓存（Redis）+ 淘汰策略。&lt;/p&gt;
+&lt;h3 id="坑-4忽略-gc-停顿"&gt;坑 4：忽略 GC 停顿
+&lt;/h3&gt;&lt;p&gt;高频写入场景，JVM Full GC 一次几秒——&lt;strong&gt;前面的调优全废了&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;解法&lt;/strong&gt;：堆外内存（DirectBuffer）/ 零 GC 语言（Rust）/ 异步批写（攒一批再 flush）。&lt;/p&gt;
+&lt;h2 id="个人反思"&gt;个人反思
+&lt;/h2&gt;&lt;p&gt;回头看 2020 年那个&amp;quot;被打脸&amp;quot;的我，最大的认知升级是：&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;&amp;ldquo;单机思维&amp;quot;和&amp;quot;分布式思维&amp;quot;之间，隔着一道叫&amp;quot;数据量级&amp;quot;的墙。&lt;/strong&gt;&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;p&gt;以前我以为：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;性能 = 算法 + 数据结构&lt;/li&gt;
+&lt;li&gt;调优 = JVM 参数 + SQL 索引&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;现在我明白：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;性能 = 内存估算 + 流式处理 + 分治并行&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;调优 = 业务约束 + 异步批处理 + 拒绝策略&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;数据量级改变了思维范式。&lt;/strong&gt; 任何人没被&amp;quot;大数&amp;quot;打过一次脸，都不会真正理解这句话。&lt;/p&gt;
+&lt;h2 id="后记"&gt;后记
+&lt;/h2&gt;&lt;p&gt;2020 年下半年，我离开了某健康集团，去了一家更硬核的物联网公司（代号 &lt;em&gt;某物联网项目&lt;/em&gt;）。那家公司每天处理 3 万台设备、12,000 QPS 的实时数据。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;但如果没在 2020 年初被&amp;quot;百万级 Excel&amp;quot;和&amp;quot;40 亿 QQ 号&amp;quot;打脸过，我大概率接不住后面的挑战。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;数据量级这道墙，&lt;strong&gt;早撞比晚撞好&lt;/strong&gt;。&lt;/p&gt;
+&lt;hr&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;关联阅读&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;面试随笔：写给 2013 年那个第一次当面试官的我&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;</description></item><item><title>面试随笔：写给 2013 年那个第一次当面试官的我</title><link>https://liangweidonggood.github.io/p/mian-shi-sui-bi-2013/</link><pubDate>Sun, 01 Dec 2013 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/mian-shi-sui-bi-2013/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/mian-shi-sui-bi-2013/image/cover.jpg" alt="Featured image of post 面试随笔：写给 2013 年那个第一次当面试官的我" /&gt;&lt;h1 id="面试随笔写给-2013-年那个第一次当面试官的我"&gt;面试随笔：写给 2013 年那个第一次当面试官的我
+&lt;/h1&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;前置&lt;/strong&gt;：这篇写于 2013 年 12 月底。我刚从某物流公司跳到某科技公司，第一次以&amp;quot;技术经理&amp;quot;身份坐在桌子另一头。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="为什么写这篇"&gt;为什么写这篇
+&lt;/h2&gt;&lt;p&gt;2013 年是我职业生涯里&lt;strong&gt;第一次身份切换&lt;/strong&gt;——从&amp;quot;被面试的&amp;quot;变成&amp;quot;面试别人的&amp;quot;。&lt;/p&gt;
+&lt;p&gt;那年某科技公司给我安排了一个新职责：参与校招和社招。我刚毕业 7 年，第一次坐在这边，看简历、提问题、写评语。一开始我以为这事简单——我自己就是被面过来的，难不倒我。结果第一个月就发现：&lt;strong&gt;会答面试题和会面试，是两码事&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;这篇随笔，是我对那一年 5 场面试（12 个候选人）的复盘，沉淀成 &lt;strong&gt;5 条核心判断 + 4 个常见坑&lt;/strong&gt;。&lt;/p&gt;
+&lt;h2 id="面试的-5-个核心判断"&gt;面试的 5 个核心判断
+&lt;/h2&gt;&lt;h3 id="1-诚实--装"&gt;1. 诚实 &amp;gt; 装
+&lt;/h3&gt;&lt;p&gt;我面过一个候选人说&amp;quot;精通 Spring 源码&amp;quot;，我问了一句&amp;quot;那 BeanFactory 的 refresh() 流程能背一下吗&amp;quot;，他愣了 10 秒，最后说&amp;quot;忘得差不多了&amp;quot;。&lt;/p&gt;
+&lt;p&gt;那 10 秒里，我对他的信任从 70 分掉到 30 分。&lt;/p&gt;
+&lt;p&gt;从那以后我看简历，&amp;ldquo;精通&amp;quot;两个字基本是&lt;strong&gt;减分项&lt;/strong&gt;。我宁愿看到&amp;quot;熟悉，读过部分源码&amp;rdquo;，然后能说清楚读了哪几块、解决过什么问题。&lt;strong&gt;知道的边界，比知道多少更重要。&lt;/strong&gt;&lt;/p&gt;
+&lt;h3 id="2-数据--形容词"&gt;2. 数据 &amp;gt; 形容词
+&lt;/h3&gt;&lt;p&gt;候选人说&amp;quot;我做了性能优化，效果明显&amp;quot;。我一定会追问：&amp;ldquo;从多少优化到多少？持续多久？用什么方法测的？&amp;rdquo;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;如果答不出来，&lt;strong&gt;大概率是编的&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;如果能答出来，&amp;ldquo;原来 QPS 200，优化后 1200&amp;rdquo;——这就是真东西&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;形容词谁都会说，&lt;strong&gt;数字骗不了人&lt;/strong&gt;。这是我这十年面试的&amp;quot;金标准&amp;quot;。&lt;/p&gt;
+&lt;h3 id="3-故事--罗列"&gt;3. 故事 &amp;gt; 罗列
+&lt;/h3&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&amp;ldquo;我用了 Redis、Kafka、HBase……&amp;rdquo;&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;p&gt;这种罗列技术栈的答案，我听完就忘。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&amp;ldquo;我接手一个接口 QPS 200，团队一直解决不了。我去查了一下，发现热点 key 都在同一个 hash tag 上，做了一次 rehash，重新分片后 QPS 到了 1500。&amp;rdquo;&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;p&gt;——这种&lt;strong&gt;有起承转合&lt;/strong&gt;的答案，我听完记得住。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;面试是讲故事，不是背目录。&lt;/strong&gt;&lt;/p&gt;
+&lt;h3 id="4-决策--知识"&gt;4. 决策 &amp;gt; 知识
+&lt;/h3&gt;&lt;p&gt;&amp;ldquo;Redis 和 Memcached 有什么区别？&amp;rdquo; 这种问题我早就不问了。能上网查的东西，问出来没意义。&lt;/p&gt;
+&lt;p&gt;我开始问&amp;quot;你当时为什么选 Redis 不选 Memcached&amp;quot;——背后的思考、权衡、踩过的坑，才是真正值钱的部分。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;架构师面试，核心是&amp;quot;为什么&amp;quot;，不是&amp;quot;是什么&amp;quot;。&lt;/strong&gt;&lt;/p&gt;
+&lt;h3 id="5-边界--假装"&gt;5. 边界 &amp;gt; 假装
+&lt;/h3&gt;&lt;p&gt;我会主动问候选人&amp;quot;你有什么学不动或者做不了的方向吗&amp;quot;。&lt;/p&gt;
+&lt;p&gt;2013 年我答不好这道题——总觉得自己什么都行。结果被面过几次才发现，&lt;strong&gt;承认自己不会的人，反而更值得信&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;愿意说&amp;quot;我 Java 后端熟，前端我只能写写静态页面，复杂交互需要找人&amp;quot;的人，比&amp;quot;我全栈&amp;quot;的人靠谱得多。&lt;/p&gt;
+&lt;h2 id="4-个常见坑"&gt;4 个常见坑
+&lt;/h2&gt;&lt;h3 id="坑-1把准备面试做成背面试题"&gt;坑 1：把&amp;quot;准备面试&amp;quot;做成&amp;quot;背面试题&amp;quot;
+&lt;/h3&gt;&lt;p&gt;我见过候选人拿着 500 题的面试题库，一题题背。我问他场景题就露馅了。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;面试不是高考，是聊天。&lt;/strong&gt; 背下来的东西，聊天里很快露馅。&lt;/p&gt;
+&lt;h3 id="坑-2简历写精通被一句追问打回原形"&gt;坑 2：简历写&amp;quot;精通&amp;quot;，被一句追问打回原形
+&lt;/h3&gt;&lt;p&gt;2013 年那年，简历上&amp;quot;精通&amp;quot;出现频率最高的三个词是&amp;quot;精通 Java&amp;quot;&amp;ldquo;精通 Spring&amp;quot;&amp;ldquo;精通 MySQL&amp;rdquo;。&lt;/p&gt;
+&lt;p&gt;后来我做了个&lt;strong&gt;自检清单&lt;/strong&gt;：每写一个&amp;quot;精通&amp;rdquo;，后面必须配一个&lt;strong&gt;能讲 10 分钟的具体案例&lt;/strong&gt;。讲不出来就改&amp;quot;熟悉&amp;quot;或&amp;quot;了解&amp;quot;。&lt;/p&gt;
+&lt;h3 id="坑-3项目经历写参与而非主导"&gt;坑 3：项目经历写&amp;quot;参与&amp;quot;而非&amp;quot;主导&amp;quot;
+&lt;/h3&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&amp;ldquo;参与了 XX 系统的开发&amp;rdquo;&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;p&gt;——这种话在我这里等于没写。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;要么写&amp;quot;主导/独立负责&amp;quot;，要么写&amp;quot;在 XX 模块负责 YY 部分&amp;quot;&lt;/strong&gt;。含糊其辞的简历，面试官会默认候选人是打酱油的。&lt;/p&gt;
+&lt;h3 id="坑-4把加班时长当卖点"&gt;坑 4：把&amp;quot;加班时长&amp;quot;当卖点
+&lt;/h3&gt;&lt;p&gt;2013 年起就有人开始把&amp;quot;能加班&amp;quot;&amp;ldquo;接受 996&amp;quot;当优势写简历。&lt;/p&gt;
+&lt;p&gt;我面试时反而会&lt;strong&gt;减分&lt;/strong&gt;——能主动用&amp;quot;工时&amp;quot;换&amp;quot;价值&amp;quot;的候选人，通常是想掩盖能力短板。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;该提的是你解决了什么问题，不是你熬了多少夜。&lt;/strong&gt;&lt;/p&gt;
+&lt;h2 id="给-2013-年那个我的-3-句话"&gt;给 2013 年那个我的 3 句话
+&lt;/h2&gt;&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;面试是双向选择。&lt;/strong&gt; 你在选公司，公司也在选你。别把自己摆太低了。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;不会就说不会。&lt;/strong&gt; 这是底线，丢了就全盘皆输。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;讲故事，而不是背答案。&lt;/strong&gt; 你过去 7 年干了什么，用 3 个故事讲清楚，比 30 段流水账强 100 倍。&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="后记"&gt;后记
+&lt;/h2&gt;&lt;p&gt;2013 年那 12 个候选人，最后我推荐了 3 个入职。这 3 个里面 2 个现在还在某科技公司做技术骨干，1 个第二年跳了阿里。&lt;/p&gt;
+&lt;p&gt;回头看，&lt;strong&gt;招人不是选最强的，是选最对的&lt;/strong&gt;。这个道理我花了 5 年才真的相信。&lt;/p&gt;
+&lt;hr&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;下篇预告&lt;/strong&gt;：2020 年 3 月，我从某健康集团做健康平台开始，第一次面对&amp;quot;数据量级&amp;quot;对架构的冲击，写了《当数据量起来之后》。&lt;/p&gt;
+
+ &lt;/blockquote&gt;</description></item></channel></rss>

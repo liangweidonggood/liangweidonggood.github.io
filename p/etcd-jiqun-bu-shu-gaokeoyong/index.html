@@ -1,0 +1,372 @@
+<!doctype html><html lang=zh-cn dir=ltr><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=description content="etcd 是 K8s 的数据心脏。本文覆盖 etcd 集群原理（为什么必须奇数节点）、3 节点集群部署、Raft 选举验证、故障模拟与 systemd 守护，etcd v3.5 实战。"><title>etcd 集群部署：3 节点高可用与 Raft 选举详解</title><link rel=canonical href=https://liangweidonggood.github.io/p/etcd-jiqun-bu-shu-gaokeoyong/><link rel=preconnect href=https://fonts.googleapis.com><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link rel=preload as=style href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap"><link rel=stylesheet href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap"><link rel=stylesheet href=/scss/style.min.e62e09c60ba428a627e03568fa3df938f6a8224f815b5846f00816c17d4a0be4.css><meta property='og:title' content="etcd 集群部署：3 节点高可用与 Raft 选举详解"><meta property='og:description' content="etcd 是 K8s 的数据心脏。本文覆盖 etcd 集群原理（为什么必须奇数节点）、3 节点集群部署、Raft 选举验证、故障模拟与 systemd 守护，etcd v3.5 实战。"><meta property='og:url' content='https://liangweidonggood.github.io/p/etcd-jiqun-bu-shu-gaokeoyong/'><meta property='og:site_name' content="Liangweidong's blog"><meta property='og:type' content='article'><meta property='article:section' content='Post'><meta property='article:tag' content='etcd'><meta property='article:tag' content='Raft'><meta property='article:tag' content='高可用'><meta property='article:tag' content='Kubernetes'><meta property='article:published_time' content='2020-09-15T00:00:00+08:00'><meta property='article:modified_time' content='2020-09-15T00:00:00+08:00'><meta property='og:image' content='https://liangweidonggood.github.io/p/etcd-jiqun-bu-shu-gaokeoyong/image/cover.jpg'><meta name=twitter:title content="etcd 集群部署：3 节点高可用与 Raft 选举详解"><meta name=twitter:description content="etcd 是 K8s 的数据心脏。本文覆盖 etcd 集群原理（为什么必须奇数节点）、3 节点集群部署、Raft 选举验证、故障模拟与 systemd 守护，etcd v3.5 实战。"><meta name=twitter:card content="summary_large_image"><meta name=twitter:image content='https://liangweidonggood.github.io/p/etcd-jiqun-bu-shu-gaokeoyong/image/cover.jpg'><link rel="shortcut icon" href=/img/favicon.png></head><body class=article-page><script>(function(){const e="StackColorScheme";localStorage.getItem(e)||localStorage.setItem(e,"auto")})()</script><script>(function(){const t="StackColorScheme",e=localStorage.getItem(t),n=window.matchMedia("(prefers-color-scheme: dark)").matches===!0;e=="dark"||e==="auto"&&n?document.documentElement.dataset.scheme="dark":document.documentElement.dataset.scheme="light"})()</script><div class="container main-container flex on-phone--column extended"><aside class="sidebar left-sidebar sticky"><button class="hamburger hamburger--spin" type=button id=toggle-menu aria-label=切换菜单>
+<span class=hamburger-box><span class=hamburger-inner></span></span></button><header><figure class=site-avatar><a href=/><img src=/img/avatar.png width=144 height=144 class=site-logo loading=lazy alt=Avatar>
+</a><span class=emoji>🍥</span></figure><div class=site-meta><h1 class=site-name><a href=/>Liangweidong's blog</a></h1><h2 class=site-description>以技术立身，以温柔生活</h2></div></header><ol class=menu-social><li><a href=https://github.com/liangweidonggood title=GitHub rel=me><svg class="icon icon-tabler icon-tabler-brand-github" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6.0 00-1.3-3.2 4.2 4.2.0 00-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3.0 00-6.2.0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2.0 00-.1 3.2A4.6 4.6.0 004 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/></svg></a></li></ol><ol class=menu id=main-menu><li><a href=/><svg class="icon icon-tabler icon-tabler-home" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><polyline points="5 12 3 12 12 3 21 12 19 12"/><path d="M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7"/><path d="M9 21v-6a2 2 0 012-2h2a2 2 0 012 2v6"/></svg>
+<span>主页</span></a></li><li><a href=/archives/><svg class="icon icon-tabler icon-tabler-archive" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><rect x="3" y="4" width="18" height="4" rx="2"/><path d="M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+<span>归档</span></a></li><li><a href=/search/><svg class="icon icon-tabler icon-tabler-search" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="10" cy="10" r="7"/><line x1="21" y1="21" x2="15" y2="15"/></svg>
+<span>搜索</span></a></li><li><a href=/%E9%93%BE%E6%8E%A5/><svg class="icon icon-tabler icon-tabler-link" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><path d="M10 14a3.5 3.5.0 005 0l4-4a3.5 3.5.0 00-5-5l-.5.5"/><path d="M14 10a3.5 3.5.0 00-5 0l-4 4a3.5 3.5.0 005 5l.5-.5"/></svg>
+<span>链接</span></a></li><li class=menu-bottom-section><ol class=menu><li id=dark-mode-toggle><svg class="icon icon-tabler icon-tabler-toggle-left" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="8" cy="12" r="2"/><rect x="2" y="6" width="20" height="12" rx="6"/></svg>
+<svg class="icon icon-tabler icon-tabler-toggle-right" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="16" cy="12" r="2"/><rect x="2" y="6" width="20" height="12" rx="6"/></svg>
+<span>暗色模式</span></li></ol></li></ol></aside><aside class="sidebar right-sidebar sticky"><section class="widget tagCloud"><div class=widget-icon><svg class="icon icon-tabler icon-tabler-hash" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><line x1="5" y1="9" x2="19" y2="9"/><line x1="5" y1="15" x2="19" y2="15"/><line x1="11" y1="4" x2="7" y2="20"/><line x1="17" y1="4" x2="13" y2="20"/></svg></div><h2 class="widget-title section-title"><a href=/categories/>分类</a></h2><div class=tagCloud-tags><a href=/categories/%E7%B3%BB%E7%BB%9F%E6%9E%B6%E6%9E%84/>系统架构
+</a><a href=/categories/%E7%BC%96%E7%A8%8B/>编程
+</a><a href=/categories/%E6%93%8D%E4%BD%9C%E7%B3%BB%E7%BB%9F/>操作系统
+</a><a href=/categories/%E5%B7%A5%E5%85%B7/>工具
+</a><a href=/categories/%E4%B8%AA%E4%BA%BA%E9%9A%8F%E7%AC%94/>个人随笔
+</a><a href=/categories/%E8%B5%84%E8%AE%AF/>资讯
+</a><a href=/categories/%E7%AE%97%E6%B3%95/>算法
+</a><a href=/categories/%E7%BD%91%E7%BB%9C/>网络</a></div></section><section class="widget archives"><div class=widget-icon><svg class="icon icon-tabler icon-tabler-hash" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><line x1="5" y1="9" x2="19" y2="9"/><line x1="5" y1="15" x2="19" y2="15"/><line x1="11" y1="4" x2="7" y2="20"/><line x1="17" y1="4" x2="13" y2="20"/></svg></div><h2 class="widget-title section-title">目录</h2><div class=widget--toc><nav class=toc-nav id=TableOfContents><ol><li><a href=#一etcd-是什么>一、etcd 是什么</a></li><li><a href=#二raft-算法与集群规模>二、Raft 算法与集群规模</a></li><li><a href=#三集群规划>三、集群规划</a></li><li><a href=#四生成-etcd-证书>四、生成 etcd 证书</a></li><li><a href=#五安装-etcd-二进制>五、安装 etcd 二进制</a></li><li><a href=#六etcd-配置文件>六、etcd 配置文件</a><ol><li><a href=#61-master1-配置>6.1 master1 配置</a></li><li><a href=#62-master2--master3-配置>6.2 master2 / master3 配置</a></li></ol></li><li><a href=#七systemd-单元文件>七、systemd 单元文件</a></li><li><a href=#八启动与验证>八、启动与验证</a></li><li><a href=#九故障模拟>九、故障模拟</a><ol><li><a href=#91-模拟-master1-宕机>9.1 模拟 master1 宕机</a></li><li><a href=#92-模拟-master2-也宕机>9.2 模拟 master2 也宕机</a></li><li><a href=#93-恢复>9.3 恢复</a></li><li><a href=#94-灾难恢复强制重建集群>9.4 灾难恢复：强制重建集群</a></li></ol></li><li><a href=#十etcdctl-常用命令>十、etcdctl 常用命令</a></li><li><a href=#十一性能调优>十一、性能调优</a></li><li><a href=#十二常见坑>十二、常见坑</a></li><li><a href=#十三前置知识--下一步>十三、前置知识 / 下一步</a></li><li><a href=#参考资料>参考资料</a></li><li><a href=#2024-视角>2024+ 视角</a></li></ol></nav></div></section></aside><main class="main full-width"><article class="has-image main-article"><header class=article-header><div class=article-image><a href=/p/etcd-jiqun-bu-shu-gaokeoyong/><img alt="Featured image of post etcd 集群部署：3 节点高可用与 Raft 选举详解" height=900 loading=lazy sizes="(max-width: 767px) calc(100vw - 30px), (max-width: 1023px) 700px, (max-width: 1279px) 950px, 1232px" src=/p/etcd-jiqun-bu-shu-gaokeoyong/image/cover.jpg srcset="/p/etcd-jiqun-bu-shu-gaokeoyong/image/cover_hu_717dfb98edf1aa15.jpg 800w, /p/etcd-jiqun-bu-shu-gaokeoyong/image/cover.jpg 1600w" width=1600></a></div><div class=article-details><header class=article-category><a href=/categories/%E7%B3%BB%E7%BB%9F%E6%9E%B6%E6%9E%84/ style=background-color:#457b9d;color:#fff>系统架构</a></header><div class=article-title-wrapper><h2 class=article-title><a href=/p/etcd-jiqun-bu-shu-gaokeoyong/>etcd 集群部署：3 节点高可用与 Raft 选举详解</a></h2><h3 class=article-subtitle>etcd 是 K8s 的数据心脏。本文覆盖 etcd 集群原理（为什么必须奇数节点）、3 节点集群部署、Raft 选举验证、故障模拟与 systemd 守护，etcd v3.5 实战。</h3></div><footer class=article-meta><div class=inline-meta><svg class="icon icon-tabler icon-tabler-calendar-time" width="56" height="56" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><path d="M11.795 21H5a2 2 0 01-2-2V7a2 2 0 012-2h12a2 2 0 012 2v4"/><circle cx="18" cy="18" r="4"/><path d="M15 3v4"/><path d="M7 3v4"/><path d="M3 11h16"/><path d="M18 16.496V18l1 1"/></svg>
+<time class=article-time--published datetime=2020-09-15T00:00:00+08:00>2020年9月15日星期二</time>
+<svg class="icon icon-tabler icon-tabler-clock" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg>
+<time class=article-time--reading>阅读时长: 6 分钟</time></div></footer></div></header><aside class=article-toc><details><summary><div class=article-toc-title><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon icon-tabler icons-tabler-outline icon-tabler-chevron-right"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M9 6l6 6-6 6"/></svg>
+<span>目录</span></div></summary><nav class=toc-nav><ol><li><a href=#一etcd-是什么>一、etcd 是什么</a></li><li><a href=#二raft-算法与集群规模>二、Raft 算法与集群规模</a></li><li><a href=#三集群规划>三、集群规划</a></li><li><a href=#四生成-etcd-证书>四、生成 etcd 证书</a></li><li><a href=#五安装-etcd-二进制>五、安装 etcd 二进制</a></li><li><a href=#六etcd-配置文件>六、etcd 配置文件</a><ol><li><a href=#61-master1-配置>6.1 master1 配置</a></li><li><a href=#62-master2--master3-配置>6.2 master2 / master3 配置</a></li></ol></li><li><a href=#七systemd-单元文件>七、systemd 单元文件</a></li><li><a href=#八启动与验证>八、启动与验证</a></li><li><a href=#九故障模拟>九、故障模拟</a><ol><li><a href=#91-模拟-master1-宕机>9.1 模拟 master1 宕机</a></li><li><a href=#92-模拟-master2-也宕机>9.2 模拟 master2 也宕机</a></li><li><a href=#93-恢复>9.3 恢复</a></li><li><a href=#94-灾难恢复强制重建集群>9.4 灾难恢复：强制重建集群</a></li></ol></li><li><a href=#十etcdctl-常用命令>十、etcdctl 常用命令</a></li><li><a href=#十一性能调优>十一、性能调优</a></li><li><a href=#十二常见坑>十二、常见坑</a></li><li><a href=#十三前置知识--下一步>十三、前置知识 / 下一步</a></li><li><a href=#参考资料>参考资料</a></li><li><a href=#2024-视角>2024+ 视角</a></li></ol></nav></details></aside><section class=article-content><blockquote><p><strong>写于 2020-09，背景</strong>：etcd v3.4 时代，K8s 1.19 仍以 3 节点 etcd 集群为生产推荐。本文聚焦 etcd 集群原理 + 实战部署。</p></blockquote><h2 id=一etcd-是什么>一、etcd 是什么</h2><p>etcd 是一个<strong>分布式键值数据库</strong>，天生为集群化设计：</p><ul><li><strong>数据模型</strong>：扁平 key-value，类比 redis 但走磁盘（强一致）</li><li><strong>一致性算法</strong>：Raft（保证多节点数据强一致）</li><li><strong>API</strong>：gRPC + HTTP/JSON，对 K8s 友好</li><li><strong>应用场景</strong>：服务发现、配置中心、K8s/calico/Docker Swarm 后端存储</li></ul><blockquote><p>etcd 是 CNCF 毕业项目，与 K8s 同源（都来自 Borg 系统的设计哲学）。</p></blockquote><h2 id=二raft-算法与集群规模>二、Raft 算法与集群规模</h2><p>Raft 在做决策时需要<strong>超半数节点投票</strong>，所以 etcd 集群推荐<strong>奇数节点</strong>（3/5/7）：</p><div class=table-wrapper><table><thead><tr><th>节点数</th><th>最大容忍故障</th><th>备注</th></tr></thead><tbody><tr><td>1</td><td>0</td><td>单实例，无集群意义</td></tr><tr><td>2</td><td>0</td><td>双节点能启动，但挂一台就选不出主，<strong>不要用</strong></td></tr><tr><td><strong>3</strong></td><td><strong>1</strong></td><td><strong>生产最低推荐</strong></td></tr><tr><td>4</td><td>1</td><td>跟 3 一样，浪费一台</td></tr><tr><td><strong>5</strong></td><td><strong>2</strong></td><td>中型集群推荐</td></tr><tr><td>6</td><td>2</td><td>跟 5 一样，浪费一台</td></tr><tr><td><strong>7</strong></td><td><strong>3</strong></td><td>大型集群（>100 节点）</td></tr></tbody></table></div><p><strong>为什么不能是偶数？</strong> 4 节点和 3 节点都是容忍 1 台故障，但 4 节点多一台机器成本；6 节点和 5 节点同理。Raft 选举只看"过半"，不看你有几个备份。</p><h2 id=三集群规划>三、集群规划</h2><p>3 master 节点同时跑 etcd（etcd 与 apiserver 同节点部署是 K8s 官方推荐）：</p><div class=table-wrapper><table><thead><tr><th>主机名</th><th>IP</th><th>角色</th></tr></thead><tbody><tr><td>master1</td><td><code>192.168.139.133</code></td><td>etcd-1 + apiserver</td></tr><tr><td>master2</td><td><code>192.168.139.134</code></td><td>etcd-2 + apiserver</td></tr><tr><td>master3</td><td><code>192.168.139.135</code></td><td>etcd-3 + apiserver</td></tr></tbody></table></div><p><strong>端口约定</strong>：</p><ul><li><code>2379</code>：客户端 API（kube-apiserver 调 etcd）</li><li><code>2380</code>：节点间 peer 通信（Raft 选举 + 数据同步）</li></ul><h2 id=四生成-etcd-证书>四、生成 etcd 证书</h2><p>K8s 集群里 etcd 走双向 TLS，证书前置在 <a class=link href=%7bfilename%7d../../%e4%ba%8c%e8%bf%9b%e5%88%b6%e9%9b%86%e7%be%a4/2020-03-15/index.md>2020-03-15《K8s 二进制部署》</a> 已签发。关键步骤回顾：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span><span class=lnt>36
+</span><span class=lnt>37
+</span><span class=lnt>38
+</span><span class=lnt>39
+</span><span class=lnt>40
+</span><span class=lnt>41
+</span><span class=lnt>42
+</span><span class=lnt>43
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># ca-config.json</span>
+</span></span><span class=line><span class=cl>cat &gt; ca-config.json <span class=s>&lt;&lt; EOF
+</span></span></span><span class=line><span class=cl><span class=s>{
+</span></span></span><span class=line><span class=cl><span class=s>  &#34;signing&#34;: {
+</span></span></span><span class=line><span class=cl><span class=s>    &#34;default&#34;: { &#34;expiry&#34;: &#34;876000h&#34; },
+</span></span></span><span class=line><span class=cl><span class=s>    &#34;profiles&#34;: {
+</span></span></span><span class=line><span class=cl><span class=s>      &#34;kubernetes&#34;: {
+</span></span></span><span class=line><span class=cl><span class=s>        &#34;usages&#34;: [&#34;signing&#34;, &#34;key encipherment&#34;, &#34;server auth&#34;, &#34;client auth&#34;],
+</span></span></span><span class=line><span class=cl><span class=s>        &#34;expiry&#34;: &#34;876000h&#34;
+</span></span></span><span class=line><span class=cl><span class=s>      }
+</span></span></span><span class=line><span class=cl><span class=s>    }
+</span></span></span><span class=line><span class=cl><span class=s>  }
+</span></span></span><span class=line><span class=cl><span class=s>}
+</span></span></span><span class=line><span class=cl><span class=s>EOF</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># etcd CA</span>
+</span></span><span class=line><span class=cl>cat &gt; etcd-ca-csr.json <span class=s>&lt;&lt; EOF
+</span></span></span><span class=line><span class=cl><span class=s>{
+</span></span></span><span class=line><span class=cl><span class=s>  &#34;CN&#34;: &#34;etcd&#34;,
+</span></span></span><span class=line><span class=cl><span class=s>  &#34;key&#34;: { &#34;algo&#34;: &#34;rsa&#34;, &#34;size&#34;: 2048 },
+</span></span></span><span class=line><span class=cl><span class=s>  &#34;names&#34;: [{ &#34;C&#34;: &#34;CN&#34;, &#34;ST&#34;: &#34;Beijing&#34;, &#34;L&#34;: &#34;Beijing&#34;, &#34;O&#34;: &#34;etcd&#34;, &#34;OU&#34;: &#34;Etcd Security&#34; }],
+</span></span></span><span class=line><span class=cl><span class=s>  &#34;ca&#34;: { &#34;expiry&#34;: &#34;876000h&#34; }
+</span></span></span><span class=line><span class=cl><span class=s>}
+</span></span></span><span class=line><span class=cl><span class=s>EOF</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>cfssl gencert -initca etcd-ca-csr.json <span class=p>|</span> cfssljson -bare /etc/etcd/ssl/etcd-ca
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># etcd server 证书（注意 hostname + IP 全列）</span>
+</span></span><span class=line><span class=cl>cat &gt; etcd-csr.json <span class=s>&lt;&lt; EOF
+</span></span></span><span class=line><span class=cl><span class=s>{
+</span></span></span><span class=line><span class=cl><span class=s>  &#34;CN&#34;: &#34;etcd&#34;,
+</span></span></span><span class=line><span class=cl><span class=s>  &#34;key&#34;: { &#34;algo&#34;: &#34;rsa&#34;, &#34;size&#34;: 2048 },
+</span></span></span><span class=line><span class=cl><span class=s>  &#34;names&#34;: [{ &#34;C&#34;: &#34;CN&#34;, &#34;ST&#34;: &#34;Beijing&#34;, &#34;L&#34;: &#34;Beijing&#34;, &#34;O&#34;: &#34;etcd&#34;, &#34;OU&#34;: &#34;Etcd Security&#34; }]
+</span></span></span><span class=line><span class=cl><span class=s>}
+</span></span></span><span class=line><span class=cl><span class=s>EOF</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>cfssl gencert <span class=se>\
+</span></span></span><span class=line><span class=cl>  -ca<span class=o>=</span>/etc/etcd/ssl/etcd-ca.pem <span class=se>\
+</span></span></span><span class=line><span class=cl>  -ca-key<span class=o>=</span>/etc/etcd/ssl/etcd-ca-key.pem <span class=se>\
+</span></span></span><span class=line><span class=cl>  -config<span class=o>=</span>ca-config.json <span class=se>\
+</span></span></span><span class=line><span class=cl>  -hostname<span class=o>=</span>127.0.0.1,master1,master2,master3,192.168.139.133,192.168.139.134,192.168.139.135 <span class=se>\
+</span></span></span><span class=line><span class=cl>  -profile<span class=o>=</span>kubernetes <span class=se>\
+</span></span></span><span class=line><span class=cl>  etcd-csr.json <span class=p>|</span> cfssljson -bare /etc/etcd/ssl/etcd
+</span></span></code></pre></td></tr></table></div></div><h2 id=五安装-etcd-二进制>五、安装 etcd 二进制</h2><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 解压</span>
+</span></span><span class=line><span class=cl>wget https://github.com/etcd-io/etcd/releases/download/v3.5.11/etcd-v3.5.11-linux-amd64.tar.gz
+</span></span><span class=line><span class=cl>tar -xf etcd-v3.5.11-linux-amd64.tar.gz
+</span></span><span class=line><span class=cl>mv etcd-v3.5.11-linux-amd64/etcd /usr/local/bin/
+</span></span><span class=line><span class=cl>mv etcd-v3.5.11-linux-amd64/etcdctl /usr/local/bin/
+</span></span><span class=line><span class=cl>mv etcd-v3.5.11-linux-amd64/etcdutl /usr/local/bin/
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 验证</span>
+</span></span><span class=line><span class=cl>etcd --version
+</span></span><span class=line><span class=cl>etcdctl version
+</span></span><span class=line><span class=cl><span class=c1># etcdctl version: 3.5.11</span>
+</span></span><span class=line><span class=cl><span class=c1># API version: 3.5</span>
+</span></span></code></pre></td></tr></table></div></div><h2 id=六etcd-配置文件>六、etcd 配置文件</h2><p>每个 master 节点单独写一份 <code>/etc/etcd/etcd.config.yml</code>，<strong>注意 name、listen URL、advertise URL 都不同</strong>。</p><h3 id=61-master1-配置>6.1 master1 配置</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;master1&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>data-dir</span><span class=p>:</span><span class=w> </span><span class=l>/var/lib/etcd</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>wal-dir</span><span class=p>:</span><span class=w> </span><span class=l>/var/lib/etcd/wal</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>snapshot-count</span><span class=p>:</span><span class=w> </span><span class=m>5000</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>heartbeat-interval</span><span class=p>:</span><span class=w> </span><span class=m>100</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>election-timeout</span><span class=p>:</span><span class=w> </span><span class=m>1000</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>quota-backend-bytes</span><span class=p>:</span><span class=w> </span><span class=m>0</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>listen-peer-urls</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;https://192.168.139.133:2380&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>listen-client-urls</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;https://192.168.139.133:2379,http://127.0.0.1:2379&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>max-snapshots</span><span class=p>:</span><span class=w> </span><span class=m>3</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>max-wals</span><span class=p>:</span><span class=w> </span><span class=m>5</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>initial-advertise-peer-urls</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;https://192.168.139.133:2380&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>advertise-client-urls</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;https://192.168.139.133:2379&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>initial-cluster</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;master1=https://192.168.139.133:2380,master2=https://192.168.139.134:2380,master3=https://192.168.139.135:2380&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>initial-cluster-token</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;etcd-k8s-cluster&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>initial-cluster-state</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;new&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>strict-reconfig-check</span><span class=p>:</span><span class=w> </span><span class=kc>false</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>enable-v2</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>enable-pprof</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>proxy</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;off&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>client-transport-security</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>cert-file</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;/etc/kubernetes/pki/etcd/etcd.pem&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>key-file</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;/etc/kubernetes/pki/etcd/etcd-key.pem&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>client-cert-auth</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>trusted-ca-file</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;/etc/kubernetes/pki/etcd/etcd-ca.pem&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>auto-tls</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>peer-transport-security</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>cert-file</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;/etc/kubernetes/pki/etcd/etcd.pem&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>key-file</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;/etc/kubernetes/pki/etcd/etcd-key.pem&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>peer-client-cert-auth</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>trusted-ca-file</span><span class=p>:</span><span class=w> </span><span class=s1>&#39;/etc/kubernetes/pki/etcd/etcd-ca.pem&#39;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>auto-tls</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>debug</span><span class=p>:</span><span class=w> </span><span class=kc>false</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>log-outputs</span><span class=p>:</span><span class=w> </span><span class=p>[</span><span class=l>default]</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>force-new-cluster</span><span class=p>:</span><span class=w> </span><span class=kc>false</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><h3 id=62-master2--master3-配置>6.2 master2 / master3 配置</h3><p>只改 <code>name</code> 和 <code>listen/advertise URL</code> 的 IP，其他保持一致。</p><h2 id=七systemd-单元文件>七、systemd 单元文件</h2><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-ini data-lang=ini><span class=line><span class=cl><span class=k>[Unit]</span>
+</span></span><span class=line><span class=cl><span class=na>Description</span><span class=o>=</span><span class=s>Etcd Service</span>
+</span></span><span class=line><span class=cl><span class=na>Documentation</span><span class=o>=</span><span class=s>https://coreos.com/etcd/docs/latest/</span>
+</span></span><span class=line><span class=cl><span class=na>After</span><span class=o>=</span><span class=s>network.target</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=k>[Service]</span>
+</span></span><span class=line><span class=cl><span class=na>Type</span><span class=o>=</span><span class=s>notify</span>
+</span></span><span class=line><span class=cl><span class=na>ExecStart</span><span class=o>=</span><span class=s>/usr/local/bin/etcd --config-file=/etc/etcd/etcd.config.yml</span>
+</span></span><span class=line><span class=cl><span class=na>Restart</span><span class=o>=</span><span class=s>on-failure</span>
+</span></span><span class=line><span class=cl><span class=na>RestartSec</span><span class=o>=</span><span class=s>10</span>
+</span></span><span class=line><span class=cl><span class=na>LimitNOFILE</span><span class=o>=</span><span class=s>65536</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=k>[Install]</span>
+</span></span><span class=line><span class=cl><span class=na>WantedBy</span><span class=o>=</span><span class=s>multi-user.target</span>
+</span></span><span class=line><span class=cl><span class=na>Alias</span><span class=o>=</span><span class=s>etcd3.service</span>
+</span></span></code></pre></td></tr></table></div></div><p>K8s 默认从 <code>/etc/kubernetes/pki/etcd/</code> 找 etcd 证书，加软链：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>mkdir -p /etc/kubernetes/pki/etcd
+</span></span><span class=line><span class=cl>ln -s /etc/etcd/ssl/* /etc/kubernetes/pki/etcd/
+</span></span></code></pre></td></tr></table></div></div><h2 id=八启动与验证>八、启动与验证</h2><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 所有 master 节点</span>
+</span></span><span class=line><span class=cl>systemctl daemon-reload
+</span></span><span class=line><span class=cl>systemctl <span class=nb>enable</span> --now etcd.service
+</span></span><span class=line><span class=cl>systemctl status etcd.service
+</span></span></code></pre></td></tr></table></div></div><p><strong>关键验证</strong>（master1 执行）：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span><span class=lnt>7
+</span><span class=lnt>8
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 注意 v2/v3 API 切换</span>
+</span></span><span class=line><span class=cl><span class=nb>export</span> <span class=nv>ETCDCTL_API</span><span class=o>=</span><span class=m>3</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>etcdctl --endpoints<span class=o>=</span><span class=s2>&#34;https://192.168.139.133:2379,https://192.168.139.134:2379,https://192.168.139.135:2379&#34;</span> <span class=se>\
+</span></span></span><span class=line><span class=cl>  --cacert<span class=o>=</span>/etc/kubernetes/pki/etcd/etcd-ca.pem <span class=se>\
+</span></span></span><span class=line><span class=cl>  --cert<span class=o>=</span>/etc/kubernetes/pki/etcd/etcd.pem <span class=se>\
+</span></span></span><span class=line><span class=cl>  --key<span class=o>=</span>/etc/kubernetes/pki/etcd/etcd-key.pem <span class=se>\
+</span></span></span><span class=line><span class=cl>  endpoint status --write-out<span class=o>=</span>table
+</span></span></code></pre></td></tr></table></div></div><p>预期输出：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span><span class=lnt>7
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>+----------------------+------------------+---------+---------+-----------+------------+-----------+------------+--------------------+
+</span></span><span class=line><span class=cl>|       ENDPOINT       |        ID        | VERSION | DB SIZE | IS LEADER | RAFT TERM | RAFT INDEX |
+</span></span><span class=line><span class=cl>+----------------------+------------------+---------+---------+-----------+------------+
+</span></span><span class=line><span class=cl>| 192.168.139.133:2379 | 67214e12874d646b |  3.5.11 |   29 kB |     false |         2 |          8 |
+</span></span><span class=line><span class=cl>| 192.168.139.134:2379 | a6947d51f82bebc4 |  3.5.11 |   29 kB |     false |         2 |          8 |
+</span></span><span class=line><span class=cl>| 192.168.139.135:2379 | f0598e5ca7a8066f |  3.5.11 |   29 kB |      true |         2 |          8 |
+</span></span><span class=line><span class=cl>+----------------------+------------------+---------+---------+-----------+------------+
+</span></span></code></pre></td></tr></table></div></div><p><strong>关键字段</strong>：</p><ul><li><code>IS LEADER</code>：true 表示该节点是当前 leader（Raft 选举结果）</li><li><code>RAFT TERM</code>：选举轮次，term 越大说明发生过越多次选举</li><li><code>DB SIZE</code>：etcd 数据库占磁盘大小</li></ul><h2 id=九故障模拟>九、故障模拟</h2><h3 id=91-模拟-master1-宕机>9.1 模拟 master1 宕机</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 在 master1 上</span>
+</span></span><span class=line><span class=cl>systemctl stop etcd
+</span></span></code></pre></td></tr></table></div></div><p>观察其他节点：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 观察 5~10 秒</span>
+</span></span><span class=line><span class=cl>watch -n <span class=m>1</span> <span class=s2>&#34;etcdctl endpoint status --cluster --write-out=table&#34;</span>
+</span></span></code></pre></td></tr></table></div></div><p>预期：master1 不可达，master3 仍为 leader（因为 3 节点允许挂 1 台）。</p><h3 id=92-模拟-master2-也宕机>9.2 模拟 master2 也宕机</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># master2</span>
+</span></span><span class=line><span class=cl>systemctl stop etcd
+</span></span></code></pre></td></tr></table></div></div><p>此时只剩 master1，<strong>集群不可用</strong>（写操作会失败），但 etcd 不会自动重启——必须人工恢复至少 2 节点。</p><h3 id=93-恢复>9.3 恢复</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># master2 / master3 启动</span>
+</span></span><span class=line><span class=cl>systemctl start etcd
+</span></span><span class=line><span class=cl><span class=c1># 集群自动重新选主（5~10 秒内）</span>
+</span></span></code></pre></td></tr></table></div></div><h3 id=94-灾难恢复强制重建集群>9.4 灾难恢复：强制重建集群</h3><p>如果 3 台都挂，etcd 数据还在，但需要 <code>--force-new-cluster</code> 强制单节点启动：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 改配置</span>
+</span></span><span class=line><span class=cl><span class=nb>echo</span> <span class=s2>&#34;initial-cluster-state: &#39;existing&#39;&#34;</span> &gt;&gt; /etc/etcd/etcd.config.yml
+</span></span><span class=line><span class=cl><span class=c1># 注意 force-new-cluster=true 只能用于一台</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 重启</span>
+</span></span><span class=line><span class=cl>systemctl start etcd
+</span></span></code></pre></td></tr></table></div></div><h2 id=十etcdctl-常用命令>十、etcdctl 常用命令</h2><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 列成员</span>
+</span></span><span class=line><span class=cl>etcdctl member list
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 健康检查</span>
+</span></span><span class=line><span class=cl>etcdctl endpoint health --cluster
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 写读测试</span>
+</span></span><span class=line><span class=cl>etcdctl put /test/foo <span class=s2>&#34;hello&#34;</span>
+</span></span><span class=line><span class=cl>etcdctl get /test/foo
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 备份</span>
+</span></span><span class=line><span class=cl>etcdctl snapshot save /tmp/etcd-backup.db
+</span></span><span class=line><span class=cl>etcdctl snapshot status /tmp/etcd-backup.db --write-out<span class=o>=</span>table
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 碎片整理（v3.4 之前需要）</span>
+</span></span><span class=line><span class=cl>etcdctl defrag
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 告警</span>
+</span></span><span class=line><span class=cl>etcdctl alarm list
+</span></span><span class=line><span class=cl>etcdctl alarm disarm
+</span></span></code></pre></td></tr></table></div></div><h2 id=十一性能调优>十一、性能调优</h2><div class=table-wrapper><table><thead><tr><th>参数</th><th>含义</th><th>默认</th><th>调优建议</th></tr></thead><tbody><tr><td><code>heartbeat-interval</code></td><td>心跳间隔（ms）</td><td>100</td><td>高延迟网络调大到 200~500</td></tr><tr><td><code>election-timeout</code></td><td>选举超时（ms）</td><td>1000</td><td>至少 5 倍 heartbeat</td></tr><tr><td><code>quota-backend-bytes</code></td><td>后端存储限额</td><td>2GB</td><td>集群 > 8GB 数据调大</td></tr><tr><td><code>snapshot-count</code></td><td>触发快照的事务数</td><td>100000</td><td>写多场景调小到 10000</td></tr><tr><td><code>max-snapshots</code></td><td>保留快照数</td><td>5</td><td>视磁盘空间</td></tr></tbody></table></div><p><strong>关键监控指标</strong>：</p><ul><li><code>etcd_disk_wal_fsync_duration_seconds</code>（p99 &lt; 10ms，否则 IO 瓶颈）</li><li><code>etcd_network_peer_round_trip_time_seconds</code>（p99 &lt; 50ms）</li><li><code>etcd_server_has_leader</code>（必须 = 1）</li><li><code>etcd_server_proposals_committed_total</code> / <code>etcd_server_proposals_applied_total</code>（差值 = pending，>5 要警惕）</li></ul><h2 id=十二常见坑>十二、常见坑</h2><ol><li><strong>证书 hostname/IP 漏配</strong>：peer 通信报 &ldquo;x509: certificate is valid for &mldr;&rdquo; 错误</li><li><strong>firewalld 没关</strong>：节点间 2380 端口不通，选举失败</li><li><strong><code>initial-cluster-state: 'new'</code> 重复使用</strong>：第二次启动报 &ldquo;member already exists&rdquo;，改成 <code>'existing'</code></li><li><strong>etcd 与 apiserver 时钟不同步</strong>：证书验证失败，先 <code>ntpdate time1.aliyun.com</code> 对齐</li><li><strong>snapshot 备份恢复后集群 ID 变了</strong>：用 <code>etcdctl snapshot restore</code> 时记得加 <code>--initial-cluster</code> 和 <code>--initial-advertise-peer-urls</code></li></ol><h2 id=十三前置知识--下一步>十三、前置知识 / 下一步</h2><p><strong>前置</strong>：</p><ul><li>证书签发（cfssl，参考 <a class=link href=%7bfilename%7d../../%e4%ba%8c%e8%bf%9b%e5%88%b6%e9%9b%86%e7%be%a4/2020-03-15/index.md>2020-03-15《K8s 二进制部署》</a>）</li><li>K8s 架构基础</li></ul><p><strong>下一步</strong>：</p><ol><li><strong>API Server 高可用</strong>（2021-03-15）—— Nginx 四层 + Keepalived VIP</li><li><strong>K8s 集群管理</strong>（2021-12-15）—— 升级、节点隔离、备份恢复</li></ol><h2 id=参考资料>参考资料</h2><ul><li><a class=link href=https://etcd.io/docs/ target=_blank rel=noopener>etcd 官方文档</a></li><li><a class=link href=https://etcd.io/docs/v3.5/op-guide/performance/ target=_blank rel=noopener>etcd 性能调优</a></li><li><a class=link href=https://raft.github.io/raftscope/index.html target=_blank rel=noopener>Raft 算法动画演示</a></li><li><a class=link href=https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/ target=_blank rel=noopener>K8s 官方 etcd 集群指南</a></li></ul><h2 id=2024-视角>2024+ 视角</h2><p>etcd 在 2024-2026 年依然是 K8s 数据底座，但生态发生了几个关键变化：</p><ol><li><strong>etcd v3.5 全面稳定</strong>：v3.5.x 引入的 <code>etcdutl</code>（替代旧 <code>etcdctl</code> 快照管理）、<code>Raft ReadIndex</code> 优化、Learner 节点都已 GA。生产推荐 <code>v3.5.10+</code>（修复了多个 Raft 性能回退问题）。</li><li><strong>K8s 1.30+ 的 etcd 管理变更</strong>：自 K8s 1.30 起，<code>kubeadm</code> 默认 etcd 容器镜像从 <code>k8s.gcr.io/etcd</code> 切到 <code>registry.k8s.io/etcd</code>，并支持 <strong>etcd Learner 节点</strong>用于接入已有 etcd 集群（适合 etcd 单独运维团队）。</li><li><strong>etcd 性能与碎片整理</strong>：v3.4 之前的 <code>defrag</code> 命令在 v3.5 已不再是必须的——<code>v3.5</code> 后端实现了在线碎片回收（<code>QuotaBackendBytes</code> + <code>AutoCompactionMode=periodic</code>）。但 DB Size 超过 <code>quota-backend-bytes</code> 仍会触发告警。</li><li><strong>可观测性增强</strong>：社区推荐 <code>etcd-dashboard</code>（来自 RedHat）+ Prometheus 抓取 <code>etcd_disk_wal_fsync_duration_seconds</code>、<code>etcd_server_has_leader</code> 等 20+ 关键指标。K8s SIG-Instrumentation 提供官方 <code>kube-etcd-monitor</code> Helm Chart。</li><li><strong>替代方案的边界</strong>：<strong>Kine</strong>（将 etcd API 翻译成 SQL）让 MySQL/PostgreSQL 可作为 K8s 后端，但生产级 etcd 仍不可替代——Raft 协议下的强一致 + 低延迟（p99 &lt; 10ms）是 etcd 的护城河。</li><li><strong>运维注意</strong>：2024 年起，多个 K8s 重大故障源于 <strong>etcd 时钟漂移</strong>（节点间 NTP 偏差 > 1s 触发 leader 选举）。建议在所有 master 节点部署 <strong>chrony</strong> 而非 ntpd，并监控 <code>node_timex_offset_seconds</code>。</li></ol><p>总之，这篇 2020 年的 etcd 部署骨架<strong>至今仍可作为新集群起点</strong>，主要补全是：升级到 v3.5.x、用 <code>etcdutl</code> 管理快照、补 Prometheus 监控。</p></section><footer class="article-meta article-footer"><section class=article-tags><a href=/tags/etcd/>Etcd</a>
+<a href=/tags/raft/>Raft</a>
+<a href=/tags/%E9%AB%98%E5%8F%AF%E7%94%A8/>高可用</a>
+<a href=/tags/kubernetes/>Kubernetes</a></section><section class="article-copyright inline-meta"><svg class="icon icon-tabler icon-tabler-copyright" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="12" cy="12" r="9"/><path d="M14.5 9a3.5 4 0 100 6"/></svg>
+<span>本作品采用 CC BY-NC-SA 4.0 协议进行许可</span></section></footer></article><aside><h2 class=section-title>相关文章</h2><div class=subsection-list><div class=article-list--tile><article class=has-image><a href=/p/k8s-erjinzhi-bu-shu-rumen/><div class=article-image><img alt="Featured image of post K8s 二进制部署：软件准备 / 证书 / 工具 / 组件全流程" height=150 loading=lazy src=/p/k8s-erjinzhi-bu-shu-rumen/image/cover_hu_a83d1171d17ba4d9.jpg srcset="/p/k8s-erjinzhi-bu-shu-rumen/image/cover_hu_a83d1171d17ba4d9.jpg 1x, /p/k8s-erjinzhi-bu-shu-rumen/image/cover_hu_543cbe37b9822dbd.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#648ad280 0%,#3c61aaC0 100%)"><h2 class=article-title>K8s 二进制部署：软件准备 / 证书 / 工具 / 组件全流程</h2></div></a></article><article class=has-image><a href=/p/k8s-shuangjifang-shuangjiqun-jiagou-redis-cluster/><div class=article-image><img alt="Featured image of post 双机房双集群架构：Redis Cluster 6 节点 + 多服务同步" height=150 loading=lazy src=/p/k8s-shuangjifang-shuangjiqun-jiagou-redis-cluster/image/cover_hu_1a4c88c77e7dad58.jpg srcset="/p/k8s-shuangjifang-shuangjiqun-jiagou-redis-cluster/image/cover_hu_1a4c88c77e7dad58.jpg 1x, /p/k8s-shuangjifang-shuangjiqun-jiagou-redis-cluster/image/cover_hu_14a388c56662bf70.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#648ad280 0%,#3c61abC0 100%)"><h2 class=article-title>双机房双集群架构：Redis Cluster 6 节点 + 多服务同步</h2></div></a></article><article class=has-image><a href=/p/k8s-etcd-3-5-jiqun-erjizhizu-bu-shu-yu-tls-zhengshu-qianfa/><div class=article-image><img alt="Featured image of post etcd 3.5 集群二进制部署与 TLS 证书签发" height=150 loading=lazy src=/p/k8s-etcd-3-5-jiqun-erjizhizu-bu-shu-yu-tls-zhengshu-qianfa/image/cover_hu_98c1871ed21b34b2.jpg srcset="/p/k8s-etcd-3-5-jiqun-erjizhizu-bu-shu-yu-tls-zhengshu-qianfa/image/cover_hu_98c1871ed21b34b2.jpg 1x, /p/k8s-etcd-3-5-jiqun-erjizhizu-bu-shu-yu-tls-zhengshu-qianfa/image/cover_hu_2fb82a234944693e.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#648ad380 0%,#3b60a9C0 100%)"><h2 class=article-title>etcd 3.5 集群二进制部署与 TLS 证书签发</h2></div></a></article><article class=has-image><a href=/p/k8s-gaokeyong-fuzaipingheng-nginx-keepalived-bianyi-yu-vip-piaoyi/><div class=article-image><img alt="Featured image of post 高可用负载均衡：Nginx + Keepalived 编译与 VIP 漂移" height=150 loading=lazy src=/p/k8s-gaokeyong-fuzaipingheng-nginx-keepalived-bianyi-yu-vip-piaoyi/image/cover_hu_8ffce70af9872550.jpg srcset="/p/k8s-gaokeyong-fuzaipingheng-nginx-keepalived-bianyi-yu-vip-piaoyi/image/cover_hu_8ffce70af9872550.jpg 1x, /p/k8s-gaokeyong-fuzaipingheng-nginx-keepalived-bianyi-yu-vip-piaoyi/image/cover_hu_b056bdf09711595c.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#2d4f9080 0%,#173468C0 100%)"><h2 class=article-title>高可用负载均衡：Nginx + Keepalived 编译与 VIP 漂移</h2></div></a></article><article class=has-image><a href=/p/k8s-shengchan-erjizhizuqun-zhubei/><div class=article-image><img alt="Featured image of post K8s 生产二进制集群前置：节点规划与 Linux 系统调优" height=150 loading=lazy src=/p/k8s-shengchan-erjizhizuqun-zhubei/image/cover_hu_2adfb69bf933b9fa.jpg srcset="/p/k8s-shengchan-erjizhizuqun-zhubei/image/cover_hu_2adfb69bf933b9fa.jpg 1x, /p/k8s-shengchan-erjizhizuqun-zhubei/image/cover_hu_730b81701a31cc44.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#36538280 0%,#153163C0 100%)"><h2 class=article-title>K8s 生产二进制集群前置：节点规划与 Linux 系统调优</h2></div></a></article></div></div></aside><script src=https://giscus.app/client.js data-repo=liangweidonggood/liangweidonggood.github.io data-repo-id="MDEwOlJlcG9zaXRvcnkxMDIzMzI5MjE=" data-category=Announcements data-category-id=DIC_kwDOBhl5-c4C-ZwO data-mapping=pathname data-strict=0 data-reactions-enabled=1 data-emit-metadata=0 data-input-position=bottom data-theme=light data-lang=zh-CN data-loading=lazy crossorigin=anonymous async></script><script>function setGiscusTheme(e){let t=document.querySelector("iframe.giscus-frame");t&&t.contentWindow.postMessage({giscus:{setConfig:{theme:e}}},"https://giscus.app")}(function(){addEventListener("message",t=>{if(event.origin!=="https://giscus.app")return;e()}),window.addEventListener("onColorSchemeChange",e);function e(){setGiscusTheme(document.documentElement.dataset.scheme==="light"?"light":"dark_dimmed")}})()</script><footer class=site-footer><section class=copyright>&copy;
+2006 -
+2026 Liangweidong's blog</section><section class=powerby>使用 <a href=https://gohugo.io/ target=_blank rel=noopener>Hugo</a> 构建<br>主题 <b><a href=https://github.com/CaiJimmy/hugo-theme-stack target=_blank rel=noopener data-version=4.0.3>Stack</a></b> 由 <a href=https://jimmycai.com target=_blank rel=noopener>Jimmy</a> 设计</section></footer><script type=module>
+    import gallery from '\/ts\/gallery.js';
+
+    const articleContent = document.querySelector('.article-content');
+    const shouldLoad = articleContent && (articleContent.querySelectorAll('figure').length > 0 || articleContent.querySelectorAll('img.gallery-image').length > 0);
+    
+    if (shouldLoad) {
+        gallery(articleContent);
+
+        const PhotoSwipeLightbox = (await import("https:\/\/cdn.jsdelivr.net\/npm\/photoswipe@5.4.4\/dist\/photoswipe-lightbox.esm.min.js")).default;
+        const styleHref = "https:\/\/cdn.jsdelivr.net\/npm\/photoswipe@5.4.4\/dist\/photoswipe.css";
+
+        const styleTag = document.createElement('link');
+        styleTag.rel = 'stylesheet';
+        styleTag.href = styleHref;
+        document.head.appendChild(styleTag);
+
+        const lightbox = new PhotoSwipeLightbox({
+            gallerySelector: '.article-content',
+            childSelector: 'figure a.image-link',
+            pswpModule: () => import("https:\/\/cdn.jsdelivr.net\/npm\/photoswipe@5.4.4\/dist\/photoswipe.esm.min.js")
+        });
+        lightbox.init();
+    }
+</script></main></div><script type=text/javascript src=/ts/main.f856840516f7c2ad1769a8f5937e3d08d6cb386e2cd2dd025ae696e0ff207958.js defer></script></body></html>

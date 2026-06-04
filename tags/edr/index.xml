@@ -1,0 +1,645 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>EDR on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/edr/</link><description>Recent content in EDR on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Sun, 15 May 2022 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/edr/index.xml" rel="self" type="application/rss+xml"/><item><title>Linux 安全加固：EDR 部署、OpenSSH 9.8 升级与挖矿病毒排查</title><link>https://liangweidonggood.github.io/p/linux-an-quan-jia-gu/</link><pubDate>Sun, 15 May 2022 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/linux-an-quan-jia-gu/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/linux-an-quan-jia-gu/image/cover.jpg" alt="Featured image of post Linux 安全加固：EDR 部署、OpenSSH 9.8 升级与挖矿病毒排查" /&gt;&lt;h2 id="一为什么-2022-年要谈-linux-安全加固"&gt;一、为什么 2022 年要谈 Linux 安全加固
+&lt;/h2&gt;&lt;p&gt;2020-2022 年是国内挖矿木马&lt;strong&gt;最高峰&lt;/strong&gt;的两年——Log4j2（2021-12 CVE-2021-44228）、Confluence（2021-2022）、Spring4Shell（2022-03 CVE-2022-22965）接连爆出，攻击者&lt;strong&gt;用漏洞横向打穿企业内网&lt;/strong&gt;后&lt;strong&gt;植入 c3Pool / MoneroOcean 等矿池挖矿代理&lt;/strong&gt;。本文整理&lt;strong&gt;三件套&lt;/strong&gt;：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;EDR Agent 一键部署&lt;/strong&gt;——商用 EDR（终端检测与响应）平台让运维少背锅&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;OpenSSH 9.8 升级&lt;/strong&gt;——修 CVE-2020-15778（OpenSSH 8.2 scp 命令注入）等高危漏洞&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;挖矿病毒应急排查&lt;/strong&gt;——c3Pool 类挖矿木马的发现、定位、清理流程&lt;/li&gt;
+&lt;/ol&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;本文写于 2022-05-15&lt;/strong&gt;。OpenSSH 9.8 是 2024-07 发布的（本文示例为 9.8p1），但编译升级流程对所有 OpenSSH 大版本升级都适用。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="二edr-agent-一键部署"&gt;二、EDR Agent 一键部署
+&lt;/h2&gt;&lt;p&gt;EDR（Endpoint Detection and Response）平台——奇安信天擎、深信服 EDR、亚信安全、青云 Radware 等——都提供 Linux 客户端（agent）。&lt;strong&gt;商业 EDR 的标准装法是从管理控制台下载安装包，到终端一键部署&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="21-命令行部署标准动作"&gt;2.1 命令行部署（标准动作）
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;wget --no-check-certificate https://&amp;lt;管理平台IP&amp;gt;:4430/download_installer_linux.php &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -O linux_edr_installer.tar.gz &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; tar -xzvf linux_edr_installer.tar.gz &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; ./agent_installer.sh -c
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;4430&lt;/code&gt; 是 EDR 管理平台默认端口&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-c&lt;/code&gt;：无参安装，从同目录的 &lt;code&gt;manager_info.txt&lt;/code&gt; 读取管理平台地址&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="22-下载器部署手动拷贝安装包"&gt;2.2 下载器部署（手动拷贝安装包）
+&lt;/h3&gt;&lt;ol&gt;
+&lt;li&gt;
+&lt;p&gt;登录管理控制台，下载 Linux 安装包&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;拷贝到服务器（scp / ftp / U 盘）&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;解压：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;tar -xzvf linux_edr_installer.tar.gz
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;装：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 无参安装（用同目录 manager_info.txt）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;./agent_installer.sh
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 自定义安装&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;./agent_installer.sh -f
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;./agent_installer.sh -h &amp;lt;mgr-domain-or-ip&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;./agent_installer.sh -h &amp;lt;mgr-host&amp;gt; -p &lt;span class="m"&gt;443&lt;/span&gt; -d /root/edr/ -f
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;参数列表：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;参数&lt;/th&gt;
+					&lt;th&gt;作用&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;-h host&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;自定义管理平台域名 / IP&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;-p port&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;自定义管理平台端口（默认 4430）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;-d dir&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;自定义安装路径（绝对路径）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;-f&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;强制安装（覆盖已有）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;--help&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;帮助&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;装完 agent 会&lt;strong&gt;自动连管理平台&lt;/strong&gt;，进程通常叫 &lt;code&gt;edr_agent&lt;/code&gt; / &lt;code&gt;qax-anti-virus&lt;/code&gt; 之类。&lt;/p&gt;
+&lt;h3 id="23-验证"&gt;2.3 验证
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ps -ef &lt;span class="p"&gt;|&lt;/span&gt; grep -i agent
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 看 EDR 进程是否在&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;netstat -antp &lt;span class="p"&gt;|&lt;/span&gt; grep &amp;lt;管理平台IP&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 看是否建立了到管理平台的连接&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;tail -f /var/log/edr/edr.log
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 看 agent 日志&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;坑提醒&lt;/strong&gt;：EDR agent 启动会占 200-500MB 内存 + 5-10% CPU，&lt;strong&gt;对老旧业务机器&lt;/strong&gt;要提前评估。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="三openssh-升级修-cve-2020-15778"&gt;三、OpenSSH 升级：修 CVE-2020-15778
+&lt;/h2&gt;&lt;p&gt;&lt;strong&gt;CVE-2020-15778&lt;/strong&gt;（CVSS 7.8 高危）：OpenSSH 8.2 的 &lt;code&gt;scp&lt;/code&gt; 命令存在&lt;strong&gt;命令注入&lt;/strong&gt;漏洞——&lt;code&gt;scp&lt;/code&gt; 在处理 &lt;code&gt;scp tgt:'echo test &amp;gt; /tmp/hack'&lt;/code&gt; 这种参数时，&lt;strong&gt;反引号会被执行&lt;/strong&gt;。&lt;strong&gt;OpenSSH 9.8p1（2024-07）已修复&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="31-走系统源升级"&gt;3.1 走系统源升级
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo apt update &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; sudo apt -y upgrade
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 或 CentOS&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo yum update openssh
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;大部分 LTS 发行版会自动 backport 修复，&lt;strong&gt;直接 &lt;code&gt;apt upgrade&lt;/code&gt; 就够了&lt;/strong&gt;——但&lt;strong&gt;版本号可能不会升到 9.8p1&lt;/strong&gt;。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="32-源码编译升级需要-98p1-完整版本"&gt;3.2 源码编译升级（需要 9.8p1 完整版本）
+&lt;/h3&gt;&lt;h4 id="321-装依赖"&gt;3.2.1 装依赖
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo apt update
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo apt install build-essential zlib1g-dev libssl-dev -y
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo apt install autoconf -y
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="322-准备-privsep-目录"&gt;3.2.2 准备 PrivSep 目录
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo mkdir /var/lib/sshd
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo chmod -R &lt;span class="m"&gt;700&lt;/span&gt; /var/lib/sshd/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo chown -R root:sys /var/lib/sshd/
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="323-装额外依赖kerberos--pam--selinux"&gt;3.2.3 装额外依赖（Kerberos / PAM / SELinux）
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo apt install libpam0g-dev libselinux1-dev libkrb5-dev -y
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="324-下载--编译"&gt;3.2.4 下载 + 编译
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;span class="lnt"&gt;9
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;curl -O https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-9.8p1.tar.gz
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo tar -zxf openssh-9.8p1.tar.gz
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nb"&gt;cd&lt;/span&gt; openssh-9.8p1
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo autoreconf
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo ./configure --with-kerberos5 --with-md5-passwords --with-pam &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --with-selinux --with-privsep-path&lt;span class="o"&gt;=&lt;/span&gt;/var/lib/sshd/ &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --sysconfdir&lt;span class="o"&gt;=&lt;/span&gt;/etc/ssh
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo make
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo make install
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="325-重启--验证"&gt;3.2.5 重启 + 验证
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo systemctl restart ssh
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo systemctl status ssh
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ssh -V
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# OpenSSH_9.8p1, OpenSSL 1.1.1f 31 Mar 2020&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;坑提醒 1&lt;/strong&gt;：升级前&lt;strong&gt;先开两个 SSH 会话&lt;/strong&gt;——一个升级、一个监视。万一升级失败，被踢出来时还有回退渠道。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;坑提醒 2&lt;/strong&gt;：编译时如果报 &lt;code&gt;configure: error: OpenSSL library not found&lt;/code&gt;，装 &lt;code&gt;libssl-dev&lt;/code&gt;（Debian/Ubuntu）或 &lt;code&gt;openssl-devel&lt;/code&gt;（RHEL/CentOS）。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;坑提醒 3&lt;/strong&gt;：升级后 &lt;code&gt;/etc/ssh/sshd_config&lt;/code&gt; 不会自动更新——但 &lt;code&gt;sshd_config&lt;/code&gt; 5.x → 9.x 兼容性一般没问题。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="四挖矿病毒应急排查"&gt;四、挖矿病毒应急排查
+&lt;/h2&gt;&lt;p&gt;c3Pool、MoneroOcean、Supportxmr 等&lt;strong&gt;门罗币矿池&lt;/strong&gt;是国内挖矿木马最常用的&amp;quot;回传通道&amp;quot;。特征：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;进程名随机（&lt;code&gt;f54e90d4&lt;/code&gt; / &lt;code&gt;ntools&lt;/code&gt; / &lt;code&gt;WbeGGvQK&lt;/code&gt; / &lt;code&gt;kthrotlds&lt;/code&gt; 等）&lt;/li&gt;
+&lt;li&gt;CPU 持续 80%+&lt;/li&gt;
+&lt;li&gt;跟矿池的 3333 / 5555 / 7777 / 14444 / 14433 等端口建连&lt;/li&gt;
+&lt;li&gt;cron 里写 &lt;code&gt;*/5 * * * * /tmp/.x/...&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;/etc/cron.d/&lt;/code&gt;、&lt;code&gt;/var/spool/cron/&lt;/code&gt;、&lt;code&gt;/etc/rc.local&lt;/code&gt; 被改&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="41-排查步骤"&gt;4.1 排查步骤
+&lt;/h3&gt;&lt;h4 id="第-1-步看-cpu-占用"&gt;第 1 步：看 CPU 占用
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;top -u &amp;lt;被怀疑的用户&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;或精确找挖矿进程：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ps -ef &lt;span class="p"&gt;|&lt;/span&gt; grep -E &lt;span class="s1"&gt;&amp;#39;kdevtmpfsi|kinsing|xmrig|minerd|c3pool&amp;#39;&lt;/span&gt; &lt;span class="p"&gt;|&lt;/span&gt; grep -v grep
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="第-2-步查网络连接"&gt;第 2 步：查网络连接
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 看跟可疑矿池的连接&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ss &lt;span class="p"&gt;|&lt;/span&gt; grep -i :3333
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ss &lt;span class="p"&gt;|&lt;/span&gt; grep -i :14444
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ss &lt;span class="p"&gt;|&lt;/span&gt; grep -i :14433
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;netstat -antp &lt;span class="p"&gt;|&lt;/span&gt; grep -E &lt;span class="s1"&gt;&amp;#39;:(3333|5555|7777|14444|14433)\s&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="第-3-步查定时任务"&gt;第 3 步：查定时任务
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;crontab -l
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ls -la /etc/cron.d/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ls -la /etc/cron.daily/ /etc/cron.hourly/ /etc/cron.weekly/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ls -la /var/spool/cron/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;cat /etc/rc.local
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="第-4-步看启动项"&gt;第 4 步：看启动项
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;systemctl list-unit-files &lt;span class="p"&gt;|&lt;/span&gt; grep enabled
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 找可疑的 .service&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;cat /etc/systemd/system/&amp;lt;可疑&amp;gt;.service
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="第-5-步杀进程--删文件"&gt;第 5 步：杀进程 + 删文件
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 杀进程&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;pkill -9 -u &amp;lt;被感染用户&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 或按 PID&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ps -ef &lt;span class="p"&gt;|&lt;/span&gt; grep -i xmrig &lt;span class="p"&gt;|&lt;/span&gt; grep -v grep &lt;span class="p"&gt;|&lt;/span&gt; awk &lt;span class="s1"&gt;&amp;#39;{print $2}&amp;#39;&lt;/span&gt; &lt;span class="p"&gt;|&lt;/span&gt; xargs &lt;span class="nb"&gt;kill&lt;/span&gt; -9
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 删文件&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;rm -rf /tmp/.x/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;rm -rf /var/tmp/.cache/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;rm -rf /root/.configrc/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 删用户&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;userdel -r &amp;lt;被感染用户&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 清空可疑 crontab&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;crontab -r
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="第-6-步改密码--收口"&gt;第 6 步：改密码 + 收口
+&lt;/h4&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;passwd root
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 改所有用户密码&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 撤 SSH 密钥&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;rm -f /root/.ssh/authorized_keys
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;rm -f /home/*/.ssh/authorized_keys
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 关可疑端口（防火墙）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;iptables -A INPUT -p tcp --dport &lt;span class="m"&gt;3333&lt;/span&gt; -j DROP
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;iptables -A INPUT -p tcp --dport &lt;span class="m"&gt;14444&lt;/span&gt; -j DROP
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 查 SSH 登录历史&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;last -a &lt;span class="p"&gt;|&lt;/span&gt; grep -i still
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 找可疑 IP&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="42-排查命令速查"&gt;4.2 排查命令速查
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 1. 看哪些用户登录了&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;last -a
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 2. 看哪些 SSH 进程在工作&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ps -ef &lt;span class="p"&gt;|&lt;/span&gt; grep sshd &lt;span class="p"&gt;|&lt;/span&gt; grep -v grep
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;netstat -antp &lt;span class="p"&gt;|&lt;/span&gt; grep &lt;span class="s1"&gt;&amp;#39;ESTABLISHED.*sshd&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 3. 查进程工作目录&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ps -ef &lt;span class="p"&gt;|&lt;/span&gt; grep -i xmrig
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;pwdx &amp;lt;PID&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ll /proc/&amp;lt;PID&amp;gt;/cwd
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# /proc/&amp;lt;PID&amp;gt;/cwd 是进程当前工作目录的软链接&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 4. 查被修改的二进制&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;rpm -Va &lt;span class="p"&gt;|&lt;/span&gt; grep -E &lt;span class="s1"&gt;&amp;#39;^..5&amp;#39;&lt;/span&gt; &lt;span class="c1"&gt;# CentOS / RHEL&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;debsums -c &lt;span class="c1"&gt;# Debian / Ubuntu&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 5=MD5 不一致 → 二进制被替换&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="43-应急清单"&gt;4.3 应急清单
+&lt;/h3&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;步骤&lt;/th&gt;
+					&lt;th&gt;命令&lt;/th&gt;
+					&lt;th&gt;目的&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;1. 隔离&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;iptables -I INPUT -s &amp;lt;可疑IP&amp;gt; -j DROP&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;阻断攻击者 SSH 入口&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;2. 拍快照&lt;/td&gt;
+					&lt;td&gt;云盘快照 / LVM 快照&lt;/td&gt;
+					&lt;td&gt;保留现场取证&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;3. 杀进程&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;pkill -9 -u &amp;lt;user&amp;gt;&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;中断挖矿&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;4. 删文件&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;rm -rf /tmp/.x/&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;清掉二进制&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;5. 改密码&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;passwd root&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;防止再次入侵&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;6. 收口&lt;/td&gt;
+					&lt;td&gt;封 3333/14444 等矿池端口&lt;/td&gt;
+					&lt;td&gt;防止复连&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;7. 复盘&lt;/td&gt;
+					&lt;td&gt;查 SSH 弱口令 / 未授权密钥 / 0day&lt;/td&gt;
+					&lt;td&gt;找到入侵路径&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="五ssh-攻击-ip-黑名单fail2ban-思路"&gt;五、SSH 攻击 IP 黑名单（fail2ban 思路）
+&lt;/h2&gt;&lt;p&gt;&lt;code&gt;fail2ban&lt;/code&gt; 是 Linux 标配的 SSH 防护工具——连续登录失败 N 次自动封 IP。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# Debian / Ubuntu&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo apt install -y fail2ban
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# CentOS / RHEL&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo yum install -y epel-release
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo yum install -y fail2ban
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;code&gt;/etc/fail2ban/jail.local&lt;/code&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;span class="lnt"&gt;9
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-ini" data-lang="ini"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;[sshd]&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="na"&gt;enabled&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;true&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="na"&gt;port&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;ssh&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="na"&gt;filter&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;sshd&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="na"&gt;logpath&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;/var/log/secure # CentOS&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# logpath = /var/log/auth.log # Ubuntu&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="na"&gt;maxretry&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;5&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="na"&gt;findtime&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;600&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="na"&gt;bantime&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;3600&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;启动：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo systemctl &lt;span class="nb"&gt;enable&lt;/span&gt; --now fail2ban
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo fail2ban-client status sshd
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="六典型坑速查"&gt;六、典型坑速查
+&lt;/h2&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;现象&lt;/th&gt;
+					&lt;th&gt;原因&lt;/th&gt;
+					&lt;th&gt;处理&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;OpenSSH 编译失败&lt;/td&gt;
+					&lt;td&gt;缺 &lt;code&gt;libssl-dev&lt;/code&gt; / &lt;code&gt;libpam0g-dev&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;走 §3.2.1 装依赖&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;SSH 升级后无法登录&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;sshd_config&lt;/code&gt; 配错&lt;/td&gt;
+					&lt;td&gt;控制台 / VNC 登录修 &lt;code&gt;/etc/ssh/sshd_config&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;EDR agent 装不上&lt;/td&gt;
+					&lt;td&gt;服务器断网 / 平台端口不通&lt;/td&gt;
+					&lt;td&gt;走 §2.2 下载器部署&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;userdel&lt;/code&gt; 失败&lt;/td&gt;
+					&lt;td&gt;用户还有进程在跑&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;pkill -u &amp;lt;user&amp;gt; &amp;amp;&amp;amp; userdel -r &amp;lt;user&amp;gt;&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;crontab -e&lt;/code&gt; 提示 &amp;ldquo;no crontab for root&amp;rdquo;&lt;/td&gt;
+					&lt;td&gt;crontab 已被清空&lt;/td&gt;
+					&lt;td&gt;这是好事，再 &lt;code&gt;crontab -e&lt;/code&gt; 重新建&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;矿池连不上但 CPU 仍高&lt;/td&gt;
+					&lt;td&gt;杀的是单进程、还有其他变种&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;pkill -9 -u &amp;lt;user&amp;gt;&lt;/code&gt; 一刀切&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="七2024-视角补充"&gt;七、2024+ 视角补充
+&lt;/h2&gt;&lt;p&gt;本文写于 2022-05，2024-2026 期间 Linux 安全加固关键演进：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;OpenSSH 9.8 → 9.9 → 10.0&lt;/strong&gt;（2024-2026）：
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;OpenSSH 9.9&lt;/strong&gt;（2024-09）：&lt;strong&gt;后量子算法默认启用&lt;/strong&gt;（ML-DSA / hybrid Streamlined NTRUPrime）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;OpenSSH 10.0&lt;/strong&gt;（2025-04）：&lt;strong&gt;dropbear 替代品&lt;/strong&gt;；&lt;strong&gt;DSA 主机密钥完全移除&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;CVE-2024-6387（regreSSHion）&lt;/strong&gt;：OpenSSH 8.5p1 ~ 9.7p1 的 &lt;strong&gt;signal handler race condition&lt;/strong&gt;——远程 RCE 漏洞，&lt;strong&gt;必须升 9.8p1+&lt;/strong&gt;（2024-07 修复）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;EDR 生态&lt;/strong&gt;（2024-2026）：
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;CrowdSec 1.0+&lt;/strong&gt;（2024）：&lt;strong&gt;社区共享 IP 黑名单&lt;/strong&gt;——fail2ban 的现代替代，&lt;strong&gt;集成 fail2ban bouncer 兼容&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Wazuh 4.9+&lt;/strong&gt;（2025）：&lt;strong&gt;开源 EDR / SIEM&lt;/strong&gt;——OSSEC 演进版，&lt;strong&gt;机器学习检测 / 合规基线&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Falco 0.40+&lt;/strong&gt;（2025）：&lt;strong&gt;CNCF 毕业&lt;/strong&gt;——&lt;strong&gt;运行时安全&lt;/strong&gt;（eBPF），&lt;strong&gt;K8s 安全监控首选&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Tetragon 1.0+&lt;/strong&gt;（2024）：&lt;strong&gt;eBPF 驱动的 K8s 安全&lt;/strong&gt;——Cilium 出品&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Tracee 1.0+&lt;/strong&gt;（2024）：Aqua Security 出品，&lt;strong&gt;运行时威胁检测&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;挖矿木马演化&lt;/strong&gt;（2024-2026）：
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;门罗币（XMR）&lt;/strong&gt; 仍是主流，&lt;strong&gt;2024+ 出现 AI 挖矿&lt;/strong&gt;（LLM 模型训练）——更隐蔽&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;APT 组织&lt;/strong&gt; 从挖矿转向&lt;strong&gt;勒索 + 数据窃取&lt;/strong&gt;双驱动——纯挖矿变少&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;供应链投毒&lt;/strong&gt; 2024+ 高发（&lt;strong&gt;XZ Utils 后门&lt;/strong&gt; CVE-2024-3094 / &lt;strong&gt;Polkit 提权&lt;/strong&gt;）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;EDR 商业方案&lt;/strong&gt;（2024+）：
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;CrowdStrike Falcon&lt;/strong&gt;（2024-07 全球蓝屏事件后信任度下降，但仍是主流）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Microsoft Defender for Endpoint / Linux&lt;/strong&gt;：2024+ 集成 K8s，&lt;strong&gt;Linux Server 端默认&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;阿里云 / 腾讯云 安骑士 / 云安全中心&lt;/strong&gt;：国内云上 EDR 首选&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;实战建议（2025-2026 视角）&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;SSH 安全&lt;/strong&gt; → 立即升 &lt;strong&gt;OpenSSH 9.8p1+&lt;/strong&gt;（修 CVE-2024-6387）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;EDR 选型&lt;/strong&gt;：
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;预算充足 / 企业&lt;/strong&gt; → CrowdStrike / Microsoft Defender&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;开源 / 自托管&lt;/strong&gt; → &lt;strong&gt;Wazuh 4.9+&lt;/strong&gt;（SIEM + EDR） / &lt;strong&gt;Falco&lt;/strong&gt;（K8s）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;挖矿防护&lt;/strong&gt; → &lt;strong&gt;CrowdSec&lt;/strong&gt; 替代 fail2ban（社区共享 IP 黑名单）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;白名单&lt;/strong&gt; → SELinux Targeted + &lt;strong&gt;OpenSCAP&lt;/strong&gt;（合规基线扫描）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;云原生&lt;/strong&gt; → &lt;strong&gt;Falco + Tetragon&lt;/strong&gt; 是 2024-2026 K8s 安全黄金组合&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="八下一步"&gt;八、下一步
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;想做更细的病毒查杀 → 上 OSSEC / Wazuh / ClamAV 等开源 EDR&lt;/li&gt;
+&lt;li&gt;想做 SSH 集中管理 → 走堡垒机（齐治 / 安恒 / JumpServer）&lt;/li&gt;
+&lt;li&gt;想做内网横向流量检测 → 上 NDR（科来、东巽科技、聚铭网络）&lt;/li&gt;
+&lt;li&gt;想给服务器上&lt;strong&gt;白名单&lt;/strong&gt;模式 → 走 SELinux Targeted 策略或 AppArmor&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="参考资料"&gt;参考资料
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.openssh.com/releasenotes.html" target="_blank" rel="noopener"
+ &gt;OpenSSH 9.8 Release Notes&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.openssh.com/releasenotes.html" target="_blank" rel="noopener"
+ &gt;OpenSSH 9.9 / 10.0 Release Notes&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://nvd.nist.gov/vuln/detail/CVE-2020-15778" target="_blank" rel="noopener"
+ &gt;CVE-2020-15778 详情&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://c3pool.com/" target="_blank" rel="noopener"
+ &gt;c3Pool 矿池（参考）&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/fail2ban/fail2ban" target="_blank" rel="noopener"
+ &gt;fail2ban 官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://crowdsec.net/" target="_blank" rel="noopener"
+ &gt;CrowdSec 替代 fail2ban&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.openssh.com/blog/pq.html" target="_blank" rel="noopener"
+ &gt;OpenSSH 量子安全算法&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.qianxin.com/" target="_blank" rel="noopener"
+ &gt;奇安信天擎 EDR&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.sangfor.com.cn/" target="_blank" rel="noopener"
+ &gt;深信服 EDR&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>

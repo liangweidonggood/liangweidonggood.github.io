@@ -1,0 +1,484 @@
+<!doctype html><html lang=zh-cn dir=ltr><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=description content="本文对比 MySQL 实时同步的两大流派：基于 Binlog 解析的 Canal / Maxwell 与基于 CDC 的 Debezium，并给出 Docker 部署、Source/Sink Connector 注册、JDBC Sink 配置、坑点排查（RecordTooLargeException、Snapshot mode）的完整实战。"><title>MySQL 实时同步实战：Canal + Debezium + Kafka Connect 全家桶</title><link rel=canonical href=https://liangweidonggood.github.io/p/mysql-cdc-canal-debezium/><link rel=preconnect href=https://fonts.googleapis.com><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link rel=preload as=style href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap"><link rel=stylesheet href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap"><link rel=stylesheet href=/scss/style.min.e62e09c60ba428a627e03568fa3df938f6a8224f815b5846f00816c17d4a0be4.css><meta property='og:title' content="MySQL 实时同步实战：Canal + Debezium + Kafka Connect 全家桶"><meta property='og:description' content="本文对比 MySQL 实时同步的两大流派：基于 Binlog 解析的 Canal / Maxwell 与基于 CDC 的 Debezium，并给出 Docker 部署、Source/Sink Connector 注册、JDBC Sink 配置、坑点排查（RecordTooLargeException、Snapshot mode）的完整实战。"><meta property='og:url' content='https://liangweidonggood.github.io/p/mysql-cdc-canal-debezium/'><meta property='og:site_name' content="Liangweidong's blog"><meta property='og:type' content='article'><meta property='article:section' content='Post'><meta property='article:tag' content='MySQL'><meta property='article:tag' content='Canal'><meta property='article:tag' content='Debezium'><meta property='article:tag' content='Kafka Connect'><meta property='article:tag' content='数据同步'><meta property='article:tag' content='CDC'><meta property='article:published_time' content='2017-06-15T00:00:00+08:00'><meta property='article:modified_time' content='2017-06-15T00:00:00+08:00'><meta property='og:image' content='https://liangweidonggood.github.io/p/mysql-cdc-canal-debezium/image/cover.jpg'><meta name=twitter:title content="MySQL 实时同步实战：Canal + Debezium + Kafka Connect 全家桶"><meta name=twitter:description content="本文对比 MySQL 实时同步的两大流派：基于 Binlog 解析的 Canal / Maxwell 与基于 CDC 的 Debezium，并给出 Docker 部署、Source/Sink Connector 注册、JDBC Sink 配置、坑点排查（RecordTooLargeException、Snapshot mode）的完整实战。"><meta name=twitter:card content="summary_large_image"><meta name=twitter:image content='https://liangweidonggood.github.io/p/mysql-cdc-canal-debezium/image/cover.jpg'><link rel="shortcut icon" href=/img/favicon.png></head><body class=article-page><script>(function(){const e="StackColorScheme";localStorage.getItem(e)||localStorage.setItem(e,"auto")})()</script><script>(function(){const t="StackColorScheme",e=localStorage.getItem(t),n=window.matchMedia("(prefers-color-scheme: dark)").matches===!0;e=="dark"||e==="auto"&&n?document.documentElement.dataset.scheme="dark":document.documentElement.dataset.scheme="light"})()</script><div class="container main-container flex on-phone--column extended"><aside class="sidebar left-sidebar sticky"><button class="hamburger hamburger--spin" type=button id=toggle-menu aria-label=切换菜单>
+<span class=hamburger-box><span class=hamburger-inner></span></span></button><header><figure class=site-avatar><a href=/><img src=/img/avatar.png width=144 height=144 class=site-logo loading=lazy alt=Avatar>
+</a><span class=emoji>🍥</span></figure><div class=site-meta><h1 class=site-name><a href=/>Liangweidong's blog</a></h1><h2 class=site-description>以技术立身，以温柔生活</h2></div></header><ol class=menu-social><li><a href=https://github.com/liangweidonggood title=GitHub rel=me><svg class="icon icon-tabler icon-tabler-brand-github" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6.0 00-1.3-3.2 4.2 4.2.0 00-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3.0 00-6.2.0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2.0 00-.1 3.2A4.6 4.6.0 004 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/></svg></a></li></ol><ol class=menu id=main-menu><li><a href=/><svg class="icon icon-tabler icon-tabler-home" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><polyline points="5 12 3 12 12 3 21 12 19 12"/><path d="M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7"/><path d="M9 21v-6a2 2 0 012-2h2a2 2 0 012 2v6"/></svg>
+<span>主页</span></a></li><li><a href=/archives/><svg class="icon icon-tabler icon-tabler-archive" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><rect x="3" y="4" width="18" height="4" rx="2"/><path d="M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+<span>归档</span></a></li><li><a href=/search/><svg class="icon icon-tabler icon-tabler-search" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="10" cy="10" r="7"/><line x1="21" y1="21" x2="15" y2="15"/></svg>
+<span>搜索</span></a></li><li><a href=/%E9%93%BE%E6%8E%A5/><svg class="icon icon-tabler icon-tabler-link" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><path d="M10 14a3.5 3.5.0 005 0l4-4a3.5 3.5.0 00-5-5l-.5.5"/><path d="M14 10a3.5 3.5.0 00-5 0l-4 4a3.5 3.5.0 005 5l.5-.5"/></svg>
+<span>链接</span></a></li><li class=menu-bottom-section><ol class=menu><li id=dark-mode-toggle><svg class="icon icon-tabler icon-tabler-toggle-left" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="8" cy="12" r="2"/><rect x="2" y="6" width="20" height="12" rx="6"/></svg>
+<svg class="icon icon-tabler icon-tabler-toggle-right" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="16" cy="12" r="2"/><rect x="2" y="6" width="20" height="12" rx="6"/></svg>
+<span>暗色模式</span></li></ol></li></ol></aside><aside class="sidebar right-sidebar sticky"><section class="widget tagCloud"><div class=widget-icon><svg class="icon icon-tabler icon-tabler-hash" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><line x1="5" y1="9" x2="19" y2="9"/><line x1="5" y1="15" x2="19" y2="15"/><line x1="11" y1="4" x2="7" y2="20"/><line x1="17" y1="4" x2="13" y2="20"/></svg></div><h2 class="widget-title section-title"><a href=/categories/>分类</a></h2><div class=tagCloud-tags><a href=/categories/%E7%B3%BB%E7%BB%9F%E6%9E%B6%E6%9E%84/>系统架构
+</a><a href=/categories/%E7%BC%96%E7%A8%8B/>编程
+</a><a href=/categories/%E6%93%8D%E4%BD%9C%E7%B3%BB%E7%BB%9F/>操作系统
+</a><a href=/categories/%E5%B7%A5%E5%85%B7/>工具
+</a><a href=/categories/%E4%B8%AA%E4%BA%BA%E9%9A%8F%E7%AC%94/>个人随笔
+</a><a href=/categories/%E8%B5%84%E8%AE%AF/>资讯
+</a><a href=/categories/%E7%AE%97%E6%B3%95/>算法
+</a><a href=/categories/%E7%BD%91%E7%BB%9C/>网络</a></div></section><section class="widget archives"><div class=widget-icon><svg class="icon icon-tabler icon-tabler-hash" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><line x1="5" y1="9" x2="19" y2="9"/><line x1="5" y1="15" x2="19" y2="15"/><line x1="11" y1="4" x2="7" y2="20"/><line x1="17" y1="4" x2="13" y2="20"/></svg></div><h2 class="widget-title section-title">目录</h2><div class=widget--toc><nav class=toc-nav id=TableOfContents><ol><li><a href=#目录>目录</a></li><li><a href=#1-同步方案对比canal-vs-debezium-vs-flink-cdc>1. 同步方案对比：Canal vs Debezium vs Flink CDC</a></li><li><a href=#2-canal基于-binlog-解析的轻量同步>2. Canal：基于 binlog 解析的轻量同步</a><ol><li><a href=#21-架构>2.1 架构</a></li><li><a href=#22-docker-部署>2.2 Docker 部署</a></li><li><a href=#23-mysql-前置配置>2.3 MySQL 前置配置</a></li><li><a href=#24-canal-adminweb-管理>2.4 canal-admin（Web 管理）</a></li><li><a href=#25-canal-server-启动>2.5 canal-server 启动</a></li><li><a href=#26-canal-adapter-启动>2.6 canal-adapter 启动</a></li></ol></li><li><a href=#3-debeziumcdc-标准的工业级实现>3. Debezium：CDC 标准的工业级实现</a><ol><li><a href=#31-三种部署方式>3.1 三种部署方式</a></li><li><a href=#32-kafka-connect-部署>3.2 Kafka Connect 部署</a></li><li><a href=#33-关键配置调大消息体>3.3 关键配置：调大消息体</a></li><li><a href=#34-注册-source-connector监听-mysql>3.4 注册 Source Connector（监听 MySQL）</a></li><li><a href=#35-常用管理-api>3.5 常用管理 API</a></li></ol></li><li><a href=#4-jdbc-sink-connector写入目标库>4. JDBC Sink Connector：写入目标库</a><ol><li><a href=#41-准备-sink-connector-jar>4.1 准备 Sink Connector JAR</a></li><li><a href=#42-注册-sink同步多张表>4.2 注册 Sink（同步多张表）</a></li><li><a href=#43-关键参数解读>4.3 关键参数解读</a></li><li><a href=#44-死信队列dlq>4.4 死信队列（DLQ）</a></li></ol></li><li><a href=#5-常见坑与排错>5. 常见坑与排错</a><ol><li><a href=#51-recordtoolargeexception>5.1 <code>RecordTooLargeException</code></a></li><li><a href=#52-failed-to-find-any-class-that-implements-connector-and-which-name-matches-ioconfluentconnectjdbcjdbcsinkconnector>5.2 <code>Failed to find any class that implements Connector and which name matches io.confluent.connect.jdbc.JdbcSinkConnector</code></a></li><li><a href=#53-no-suitable-driver-found-for-jdbcmysql>5.3 <code>No suitable driver found for jdbc:mysql://...</code></a></li><li><a href=#54-source-connector-卡在-running-但不消费>5.4 Source Connector 卡在 RUNNING 但不消费</a></li><li><a href=#55-时间类型不匹配>5.5 时间类型不匹配</a></li><li><a href=#56-canal-table-meta-tsdb-is-out-of-sync>5.6 Canal &ldquo;table meta tsdb is out of sync&rdquo;</a></li></ol></li><li><a href=#6-生产建议>6. 生产建议</a><ol><li><a href=#61-选型>6.1 选型</a></li><li><a href=#62-监控>6.2 监控</a></li><li><a href=#63-反向思考什么场景不能用>6.3 反向思考：什么场景不能用？</a></li><li><a href=#64-自建镜像>6.4 自建镜像</a></li></ol></li><li><a href=#下一步>下一步</a></li></ol></nav></div></section></aside><main class="main full-width"><article class="has-image main-article"><header class=article-header><div class=article-image><a href=/p/mysql-cdc-canal-debezium/><img alt="Featured image of post MySQL 实时同步实战：Canal + Debezium + Kafka Connect 全家桶" height=900 loading=lazy sizes="(max-width: 767px) calc(100vw - 30px), (max-width: 1023px) 700px, (max-width: 1279px) 950px, 1232px" src=/p/mysql-cdc-canal-debezium/image/cover.jpg srcset="/p/mysql-cdc-canal-debezium/image/cover_hu_53f3c3f18c8d2a38.jpg 800w, /p/mysql-cdc-canal-debezium/image/cover.jpg 1600w" width=1600></a></div><div class=article-details><header class=article-category><a href=/categories/%E7%BC%96%E7%A8%8B/ style=background-color:#6c5ce7;color:#fff>编程</a></header><div class=article-title-wrapper><h2 class=article-title><a href=/p/mysql-cdc-canal-debezium/>MySQL 实时同步实战：Canal + Debezium + Kafka Connect 全家桶</a></h2><h3 class=article-subtitle>本文对比 MySQL 实时同步的两大流派：基于 Binlog 解析的 Canal / Maxwell 与基于 CDC 的 Debezium，并给出 Docker 部署、Source/Sink Connector 注册、JDBC Sink 配置、坑点排查（RecordTooLargeException、Snapshot mode）的完整实战。</h3></div><footer class=article-meta><div class=inline-meta><svg class="icon icon-tabler icon-tabler-calendar-time" width="56" height="56" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><path d="M11.795 21H5a2 2 0 01-2-2V7a2 2 0 012-2h12a2 2 0 012 2v4"/><circle cx="18" cy="18" r="4"/><path d="M15 3v4"/><path d="M7 3v4"/><path d="M3 11h16"/><path d="M18 16.496V18l1 1"/></svg>
+<time class=article-time--published datetime=2017-06-15T00:00:00+08:00>2017年6月15日星期四</time>
+<svg class="icon icon-tabler icon-tabler-clock" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg>
+<time class=article-time--reading>阅读时长: 6 分钟</time></div></footer></div></header><aside class=article-toc><details><summary><div class=article-toc-title><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon icon-tabler icons-tabler-outline icon-tabler-chevron-right"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M9 6l6 6-6 6"/></svg>
+<span>目录</span></div></summary><nav class=toc-nav><ol><li><a href=#目录>目录</a></li><li><a href=#1-同步方案对比canal-vs-debezium-vs-flink-cdc>1. 同步方案对比：Canal vs Debezium vs Flink CDC</a></li><li><a href=#2-canal基于-binlog-解析的轻量同步>2. Canal：基于 binlog 解析的轻量同步</a><ol><li><a href=#21-架构>2.1 架构</a></li><li><a href=#22-docker-部署>2.2 Docker 部署</a></li><li><a href=#23-mysql-前置配置>2.3 MySQL 前置配置</a></li><li><a href=#24-canal-adminweb-管理>2.4 canal-admin（Web 管理）</a></li><li><a href=#25-canal-server-启动>2.5 canal-server 启动</a></li><li><a href=#26-canal-adapter-启动>2.6 canal-adapter 启动</a></li></ol></li><li><a href=#3-debeziumcdc-标准的工业级实现>3. Debezium：CDC 标准的工业级实现</a><ol><li><a href=#31-三种部署方式>3.1 三种部署方式</a></li><li><a href=#32-kafka-connect-部署>3.2 Kafka Connect 部署</a></li><li><a href=#33-关键配置调大消息体>3.3 关键配置：调大消息体</a></li><li><a href=#34-注册-source-connector监听-mysql>3.4 注册 Source Connector（监听 MySQL）</a></li><li><a href=#35-常用管理-api>3.5 常用管理 API</a></li></ol></li><li><a href=#4-jdbc-sink-connector写入目标库>4. JDBC Sink Connector：写入目标库</a><ol><li><a href=#41-准备-sink-connector-jar>4.1 准备 Sink Connector JAR</a></li><li><a href=#42-注册-sink同步多张表>4.2 注册 Sink（同步多张表）</a></li><li><a href=#43-关键参数解读>4.3 关键参数解读</a></li><li><a href=#44-死信队列dlq>4.4 死信队列（DLQ）</a></li></ol></li><li><a href=#5-常见坑与排错>5. 常见坑与排错</a><ol><li><a href=#51-recordtoolargeexception>5.1 <code>RecordTooLargeException</code></a></li><li><a href=#52-failed-to-find-any-class-that-implements-connector-and-which-name-matches-ioconfluentconnectjdbcjdbcsinkconnector>5.2 <code>Failed to find any class that implements Connector and which name matches io.confluent.connect.jdbc.JdbcSinkConnector</code></a></li><li><a href=#53-no-suitable-driver-found-for-jdbcmysql>5.3 <code>No suitable driver found for jdbc:mysql://...</code></a></li><li><a href=#54-source-connector-卡在-running-但不消费>5.4 Source Connector 卡在 RUNNING 但不消费</a></li><li><a href=#55-时间类型不匹配>5.5 时间类型不匹配</a></li><li><a href=#56-canal-table-meta-tsdb-is-out-of-sync>5.6 Canal &ldquo;table meta tsdb is out of sync&rdquo;</a></li></ol></li><li><a href=#6-生产建议>6. 生产建议</a><ol><li><a href=#61-选型>6.1 选型</a></li><li><a href=#62-监控>6.2 监控</a></li><li><a href=#63-反向思考什么场景不能用>6.3 反向思考：什么场景不能用？</a></li><li><a href=#64-自建镜像>6.4 自建镜像</a></li></ol></li><li><a href=#下一步>下一步</a></li></ol></nav></details></aside><section class=article-content><blockquote><p><strong>为什么写这篇</strong>：MySQL 实时同步有两条主流路径——<strong>应用层</strong>（Canal / Maxwell 解 binlog → 自定义消费者）和<strong>CDC 标准</strong>（Debezium → Kafka Connect → JDBC Sink）。前者灵活但要写代码，后者标准但坑点多。本文把两条路都走一遍，重点写<strong>真实环境的配置和报错</strong>。</p><p><strong>适用读者</strong>：需要做 MySQL → MySQL/PG/ES 实时同步的中间件开发、DBA。</p><p><strong>前置知识</strong>：了解 MySQL binlog、知道 Kafka 是什么、能用 docker 跑容器。</p></blockquote><h2 id=目录>目录</h2><ol><li><a class=link href=#1-%e5%90%8c%e6%ad%a5%e6%96%b9%e6%a1%88%e5%af%b9%e6%af%94canal-vs-debezium-vs-flink-cdc>同步方案对比：Canal vs Debezium vs Flink CDC</a></li><li><a class=link href=#2-canal%e5%9f%ba%e4%ba%8e-binlog-%e8%a7%a3%e6%9e%90%e7%9a%84%e8%bd%bb%e9%87%8f%e5%90%8c%e6%ad%a5>Canal：基于 binlog 解析的轻量同步</a></li><li><a class=link href=#3-debeziumcdc-%e6%a0%87%e5%87%86%e7%9a%84%e5%b7%a5%e4%b8%9a%e7%ba%a7%e5%ae%9e%e7%8e%b0>Debezium：CDC 标准的工业级实现</a></li><li><a class=link href=#4-jdbc-sink-connector%e5%86%99%e5%85%a5%e7%9b%ae%e6%a0%87%e5%ba%93>JDBC Sink Connector：写入目标库</a></li><li><a class=link href=#5-%e5%b8%b8%e8%a7%81%e5%9d%91%e4%b8%8e%e6%8e%92%e9%94%99>常见坑与排错</a></li><li><a class=link href=#6-%e7%94%9f%e4%ba%a7%e5%bb%ba%e8%ae%ae>生产建议</a></li></ol><hr><h2 id=1-同步方案对比canal-vs-debezium-vs-flink-cdc>1. 同步方案对比：Canal vs Debezium vs Flink CDC</h2><div class=table-wrapper><table><thead><tr><th>维度</th><th><strong>Canal</strong></th><th><strong>Debezium</strong></th><th><strong>Flink CDC</strong></th></tr></thead><tbody><tr><td>厂商</td><td>Alibaba</td><td>Red Hat / Decodable</td><td>Apache</td></tr><tr><td>协议</td><td>自定义 TCP / Kafka / RocketMQ</td><td>Kafka Connect（标准）</td><td>Flink SQL（标准）</td></tr><tr><td>部署</td><td>canal-server + canal-adapter</td><td>Connect + Source/Sink Connector</td><td>Flink Job</td></tr><tr><td>转换能力</td><td>adapter 内置 ES/HBase/MySQL</td><td>需配 Sink，转换靠 SMT</td><td>SQL 表达</td></tr><tr><td>优点</td><td>文档全、中文社区、Java 友好</td><td>标准化、生态广</td><td>流式计算能力强</td></tr><tr><td>缺点</td><td>强耦合阿里系</td><td>K8s 集成较新</td><td>重型，要 Flink 集群</td></tr><tr><td>适用</td><td>中小规模同步、阿里系架构</td><td>大规模、跨团队标准化</td><td>实时数仓 + 流计算</td></tr></tbody></table></div><blockquote><p><strong>选型建议</strong>：</p><ul><li>数据量 &lt; 10 万 QPS，且目标库固定：选 <strong>Canal</strong></li><li>跨团队、多源异构（MySQL + PG + Mongo + Oracle）：选 <strong>Debezium</strong></li><li>要做聚合、JOIN、流式 ETL：选 <strong>Flink CDC</strong></li></ul></blockquote><hr><h2 id=2-canal基于-binlog-解析的轻量同步>2. Canal：基于 binlog 解析的轻量同步</h2><h3 id=21-架构>2.1 架构</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span><span class=lnt>7
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>MySQL master
+</span></span><span class=line><span class=cl>    │ binlog ROW
+</span></span><span class=line><span class=cl>    ▼
+</span></span><span class=line><span class=cl>canal-server  ← 模拟 MySQL slave 协议
+</span></span><span class=line><span class=cl>    │ CanalTSDB / MQ
+</span></span><span class=line><span class=cl>    ▼
+</span></span><span class=line><span class=cl>canal-adapter  ← 消费 + 转换 + 写目标库（ES/HBase/MySQL）
+</span></span></code></pre></td></tr></table></div></div><h3 id=22-docker-部署>2.2 Docker 部署</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>docker pull canal/canal-server:latest
+</span></span><span class=line><span class=cl>docker pull slpcat/canal-adapter:v1.1.5-jdk8
+</span></span><span class=line><span class=cl>docker pull canal/canal-admin:latest
+</span></span></code></pre></td></tr></table></div></div><h3 id=23-mysql-前置配置>2.3 MySQL 前置配置</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-ini data-lang=ini><span class=line><span class=cl><span class=c1># /etc/my.cnf</span>
+</span></span><span class=line><span class=cl><span class=k>[mysqld]</span>
+</span></span><span class=line><span class=cl><span class=na>log-bin</span><span class=o>=</span><span class=s>mysql-bin</span>
+</span></span><span class=line><span class=cl><span class=na>binlog-format</span><span class=o>=</span><span class=s>ROW    # 必须 ROW</span>
+</span></span><span class=line><span class=cl><span class=na>server_id</span><span class=o>=</span><span class=s>6          # 主从唯一</span>
+</span></span></code></pre></td></tr></table></div></div><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-sql data-lang=sql><span class=line><span class=cl><span class=c1>-- 给 canal 专用账号
+</span></span></span><span class=line><span class=cl><span class=k>CREATE</span><span class=w> </span><span class=k>USER</span><span class=w> </span><span class=n>canal</span><span class=w> </span><span class=n>IDENTIFIED</span><span class=w> </span><span class=k>BY</span><span class=w> </span><span class=s1>&#39;canal&#39;</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=k>GRANT</span><span class=w> </span><span class=k>SELECT</span><span class=p>,</span><span class=w> </span><span class=k>INSERT</span><span class=p>,</span><span class=w> </span><span class=k>UPDATE</span><span class=p>,</span><span class=w> </span><span class=k>DELETE</span><span class=p>,</span><span class=w> </span><span class=k>ALTER</span><span class=p>,</span><span class=w> </span><span class=k>DROP</span><span class=p>,</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=n>REPLICATION</span><span class=w> </span><span class=n>SLAVE</span><span class=p>,</span><span class=w> </span><span class=n>REPLICATION</span><span class=w> </span><span class=n>CLIENT</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=k>ON</span><span class=w> </span><span class=o>*</span><span class=p>.</span><span class=o>*</span><span class=w> </span><span class=k>TO</span><span class=w> </span><span class=s1>&#39;canal&#39;</span><span class=o>@</span><span class=s1>&#39;%&#39;</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>FLUSH</span><span class=w> </span><span class=k>PRIVILEGES</span><span class=p>;</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><h3 id=24-canal-adminweb-管理>2.4 canal-admin（Web 管理）</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 1. 启动临时 admin 把配置导出来</span>
+</span></span><span class=line><span class=cl>docker run --name canal-admin -d canal/canal-admin:latest
+</span></span><span class=line><span class=cl>docker <span class=nb>exec</span> -it canal-admin bash
+</span></span><span class=line><span class=cl><span class=c1># 配置目录：/home/admin/canal-admin/conf/</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 2. 拷贝配置到宿主机</span>
+</span></span><span class=line><span class=cl>docker cp canal-admin:/home/admin/canal-admin/conf /home/docker/canal/admin
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 3. 修改 application.yml 配置 MySQL</span>
+</span></span><span class=line><span class=cl>vim /home/docker/canal/admin/conf/application.yml
+</span></span><span class=line><span class=cl><span class=c1># datasource:</span>
+</span></span><span class=line><span class=cl><span class=c1>#   url: jdbc:mysql://internal.example.com:3306/canal_manager</span>
+</span></span><span class=line><span class=cl><span class=c1>#   username: canal</span>
+</span></span><span class=line><span class=cl><span class=c1>#   password: {{REDACTED}}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 4. 初始化 SQL（canal-1.1.6+）</span>
+</span></span><span class=line><span class=cl><span class=c1># https://github.com/alibaba/canal/blob/canal-1.1.6/admin/admin-web/src/main/resources/canal_manager.sql</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 5. 删除临时容器，重启正式容器</span>
+</span></span><span class=line><span class=cl>docker rm -f canal-admin
+</span></span><span class=line><span class=cl>docker run -d --name canal-admin --restart<span class=o>=</span>always <span class=se>\
+</span></span></span><span class=line><span class=cl>  -p 8089:8089 <span class=se>\
+</span></span></span><span class=line><span class=cl>  -v /home/docker/canal/admin/conf:/home/admin/canal-admin/conf <span class=se>\
+</span></span></span><span class=line><span class=cl>  -v /home/docker/canal/admin/logs:/home/admin/canal-admin/logs <span class=se>\
+</span></span></span><span class=line><span class=cl>  canal/canal-admin:latest
+</span></span></code></pre></td></tr></table></div></div><p>Web 地址：<code>http://internal.example.com:8089</code>，默认账号 <code>admin/123456</code>。</p><h3 id=25-canal-server-启动>2.5 canal-server 启动</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 1. 拷贝配置</span>
+</span></span><span class=line><span class=cl>docker run --name canal-server -d canal/canal-server:v1.1.5
+</span></span><span class=line><span class=cl>docker <span class=nb>exec</span> -it canal-server bash
+</span></span><span class=line><span class=cl>docker cp canal-server:/home/admin/canal-server/conf /home/docker/canal/server
+</span></span><span class=line><span class=cl>docker rm -f canal-server
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 2. 修改 instance.properties（指定监听的库）</span>
+</span></span><span class=line><span class=cl>vim /home/docker/canal/server/conf/example/instance.properties
+</span></span><span class=line><span class=cl><span class=c1># canal.instance.master.address=internal.example.com:3306</span>
+</span></span><span class=line><span class=cl><span class=c1># canal.instance.dbUsername=canal</span>
+</span></span><span class=line><span class=cl><span class=c1># canal.instance.dbPassword=canal</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 监听多个库：canal.properties</span>
+</span></span><span class=line><span class=cl>vim /home/docker/canal/server/conf/canal.properties
+</span></span><span class=line><span class=cl><span class=c1># canal.destinations = example,example2,example3</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 3. 启动</span>
+</span></span><span class=line><span class=cl>docker run -d --name canal-server --restart<span class=o>=</span>always <span class=se>\
+</span></span></span><span class=line><span class=cl>  -p 11110:11110 -p 11111:11111 -p 11112:11112 -p 9100:9100 <span class=se>\
+</span></span></span><span class=line><span class=cl>  -v /home/docker/canal/server/conf:/home/admin/canal-server/conf <span class=se>\
+</span></span></span><span class=line><span class=cl>  -v /home/docker/canal/server/logs:/home/admin/canal-server/logs <span class=se>\
+</span></span></span><span class=line><span class=cl>  canal/canal-server:latest
+</span></span></code></pre></td></tr></table></div></div><h3 id=26-canal-adapter-启动>2.6 canal-adapter 启动</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span><span class=lnt>7
+</span><span class=lnt>8
+</span><span class=lnt>9
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 拷贝 adapter 配置</span>
+</span></span><span class=line><span class=cl>docker run --name canal-adapter -d slpcat/canal-adapter:v1.1.5
+</span></span><span class=line><span class=cl>docker cp canal-adapter:/opt/canal-adapter/conf/application.yml /home/docker/canal/adapter
+</span></span><span class=line><span class=cl>docker cp canal-adapter:/opt/canal-adapter/conf/rdb/mytest_user.yml /home/docker/canal/adapter/rdb
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 启动</span>
+</span></span><span class=line><span class=cl>docker run -d --name canal-adapter -p 8081:8081 <span class=se>\
+</span></span></span><span class=line><span class=cl>  -v /home/docker/canal/adapter:/opt/canal-adapter/conf <span class=se>\
+</span></span></span><span class=line><span class=cl>  slpcat/canal-adapter:v1.1.5
+</span></span></code></pre></td></tr></table></div></div><blockquote><p><strong>坑点</strong>：canal-adapter 官方 JDK 镜像兼容性差，生产建议用自定义镜像（<code>lwd/jdk:8u371</code>）。</p></blockquote><hr><h2 id=3-debeziumcdc-标准的工业级实现>3. Debezium：CDC 标准的工业级实现</h2><h3 id=31-三种部署方式>3.1 三种部署方式</h3><div class=table-wrapper><table><thead><tr><th>方式</th><th>适用</th></tr></thead><tbody><tr><td><strong>Kafka Connect</strong>（推荐）</td><td>生产环境，标准化、可观测性最好</td></tr><tr><td><strong>Debezium Server</strong></td><td>不想维护 Kafka 时，单独的应用</td></tr><tr><td><strong>Embedded Engine</strong></td><td>应用代码里嵌入 Debezium（自定义流）</td></tr></tbody></table></div><h3 id=32-kafka-connect-部署>3.2 Kafka Connect 部署</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>mkdir -p /home/docker/debezium/2.5.4/
+</span></span><span class=line><span class=cl><span class=nb>cd</span> /home/docker/debezium/2.5.4/
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># docker-compose.yaml 启动 Zookeeper + Kafka + Connect + UI</span>
+</span></span><span class=line><span class=cl>docker-compose up -d
+</span></span></code></pre></td></tr></table></div></div><blockquote><p>K8s 上可以参考 <a class=link href=https://strimzi.io/ target=_blank rel=noopener>Strimzi</a> 项目（包含 Kafka/Kafka Connect/Topic/User 三个 Operator）。</p></blockquote><h3 id=33-关键配置调大消息体>3.3 关键配置：调大消息体</h3><p>默认 Kafka 消息体 1MB，大表 UPDATE/INSERT 必报：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>The message is 2554545 bytes when serialized which is larger than 1048576,
+</span></span><span class=line><span class=cl>which is the value of the max.request.size configuration.
+</span></span></code></pre></td></tr></table></div></div><p><strong>修法（kafka 端）</strong>：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=c># docker-compose.yaml</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>kafka</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>environment</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span>- <span class=l>KAFKA_MESSAGE_MAX_BYTES=1048576000</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span>- <span class=l>KAFKA_MAX_REQUEST_SIZE=1048576000</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span>- <span class=l>KAFKA_PRODUCER_MAX_REQUEST_SIZE=1048576000</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>connect</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>environment</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span>- <span class=l>CONNECT_MESSAGE_MAX_BYTES=1048576000</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span>- <span class=l>CONNECT_MAX_REQUEST_SIZE=1048576000</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span>- <span class=l>CONNECT_PRODUCER_MAX_REQUEST_SIZE=1048576000</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><blockquote><p><strong>坑点</strong>：直接在容器内改 <code>server.properties</code> 不会生效，<strong>必须通过环境变量注入</strong>——这是无数人踩过的坑。</p></blockquote><h3 id=34-注册-source-connector监听-mysql>3.4 注册 Source Connector（监听 MySQL）</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 1. 注册 MySQL 源</span>
+</span></span><span class=line><span class=cl>curl -i -X POST -H <span class=s2>&#34;Content-Type: application/json&#34;</span> <span class=se>\
+</span></span></span><span class=line><span class=cl>  http://localhost:28083/connectors/ -d <span class=s1>&#39;
+</span></span></span><span class=line><span class=cl><span class=s1>{
+</span></span></span><span class=line><span class=cl><span class=s1>  &#34;name&#34;: &#34;source-hnDev&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>  &#34;config&#34;: {
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;connector.class&#34;: &#34;io.debezium.connector.mysql.MySqlConnector&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;tasks.max&#34;: &#34;1&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;topic.prefix&#34;: &#34;hnDev&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;database.hostname&#34;: &#34;internal.example.com&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;database.port&#34;: &#34;3306&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;database.user&#34;: &#34;root&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;database.password&#34;: &#34;{{REDACTED}}&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;database.server.id&#34;: &#34;1&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;database.include.list&#34;: &#34;industry_iot&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;snapshot.mode&#34;: &#34;SCHEMA_ONLY&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;snapshot.locking.mode&#34;: &#34;none&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;tombstones.on.delete&#34;: &#34;false&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;schema.history.internal.kafka.topic&#34;: &#34;history.hnDev.industry_iot&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;schema.history.internal.kafka.bootstrap.servers&#34;: &#34;kafka:9092&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;time.precision.mode&#34;: &#34;connect&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;database.serverTimezone&#34;: &#34;Asia/Shanghai&#34;
+</span></span></span><span class=line><span class=cl><span class=s1>  }
+</span></span></span><span class=line><span class=cl><span class=s1>}&#39;</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 2. 验证</span>
+</span></span><span class=line><span class=cl>curl http://10.0.0.127:28083/connectors/source-hnDev/status
+</span></span></code></pre></td></tr></table></div></div><p><strong><code>snapshot.mode</code> 4 种模式</strong>：</p><div class=table-wrapper><table><thead><tr><th>值</th><th>行为</th><th>适用</th></tr></thead><tbody><tr><td><code>initial</code>（默认）</td><td>先全量快照，之后持续订阅 binlog</td><td>首次接入</td></tr><tr><td><code>initial_only</code></td><td>只做全量快照</td><td>一次性数据迁移</td></tr><tr><td><code>schema_only</code></td><td>只同步 schema（不导数据），但持续订阅 DML</td><td>已有数据，只关心后续变更</td></tr><tr><td><code>schema_only_recovery</code></td><td>仅恢复 schema history topic（不导数据）</td><td>灾难恢复</td></tr></tbody></table></div><blockquote><p><strong>关键区别</strong>：<code>initial</code> 会把表所有数据先读一遍写入 topic；<code>schema_only</code> 不读数据只读 schema history。DML 是 binlog 持续订阅，与 snapshot 无关。</p></blockquote><h3 id=35-常用管理-api>3.5 常用管理 API</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 列出所有连接器</span>
+</span></span><span class=line><span class=cl>curl -s http://internal.example.com:8083/connectors
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 查看某个连接器状态</span>
+</span></span><span class=line><span class=cl>curl -s http://internal.example.com:8083/connectors/inventory-connector/status
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 查看连接器配置</span>
+</span></span><span class=line><span class=cl>curl -s http://internal.example.com:8083/connectors/inventory-connector/config
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 暂停</span>
+</span></span><span class=line><span class=cl>curl -s -X PUT http://internal.example.com:8083/connectors/inventory-connector/pause
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 恢复</span>
+</span></span><span class=line><span class=cl>curl -s -X PUT http://internal.example.com:8083/connectors/inventory-connector/resume
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 重启</span>
+</span></span><span class=line><span class=cl>curl -s -X PUT http://internal.example.com:8083/connectors/inventory-connector/resume
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 删除</span>
+</span></span><span class=line><span class=cl>curl -s -X DELETE http://internal.example.com:8083/connectors/inventory-connector
+</span></span></code></pre></td></tr></table></div></div><hr><h2 id=4-jdbc-sink-connector写入目标库>4. JDBC Sink Connector：写入目标库</h2><h3 id=41-准备-sink-connector-jar>4.1 准备 Sink Connector JAR</h3><p>Debezium Connect 自带 <strong>Source Connector</strong>（MySQL/PG/Mongo/Oracle/SQL Server/Db2），但 <strong>Sink Connector 需要自己注册</strong>：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 1. 进 connect 容器建目录</span>
+</span></span><span class=line><span class=cl>docker <span class=nb>exec</span> -it connect bash
+</span></span><span class=line><span class=cl>mkdir -p /kafka/connect/kafka-connect-jdbc
+</span></span><span class=line><span class=cl><span class=nb>exit</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 2. 下载 kafka-connect-jdbc JAR</span>
+</span></span><span class=line><span class=cl>wget https://packages.confluent.io/maven/io/confluent/kafka-connect-jdbc/10.7.4/kafka-connect-jdbc-10.7.4.jar
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 3. 拷贝进 connect 容器</span>
+</span></span><span class=line><span class=cl>docker cp kafka-connect-jdbc-10.7.4.jar connect:/kafka/connect/kafka-connect-jdbc
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 4. 必须同时拷 MySQL JDBC 驱动（否则 sink 报 No suitable driver found）</span>
+</span></span><span class=line><span class=cl>docker cp mysql-connector-java-8.0.23.jar connect:/kafka/connect/kafka-connect-jdbc
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 5. 重启 connect 让新插件加载</span>
+</span></span><span class=line><span class=cl>docker restart connect
+</span></span></code></pre></td></tr></table></div></div><h3 id=42-注册-sink同步多张表>4.2 注册 Sink（同步多张表）</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>curl -i -X POST -H <span class=s2>&#34;Content-Type: application/json&#34;</span> <span class=se>\
+</span></span></span><span class=line><span class=cl>  http://localhost:28083/connectors/ -d <span class=s1>&#39;
+</span></span></span><span class=line><span class=cl><span class=s1>{
+</span></span></span><span class=line><span class=cl><span class=s1>  &#34;name&#34;: &#34;sink-prod-hnDev&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>  &#34;config&#34;: {
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;connector.class&#34;: &#34;io.confluent.connect.jdbc.JdbcSinkConnector&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;tasks.max&#34;: &#34;1&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;topics&#34;: &#34;hnDev.industry_iot.risk_task,hnDev.industry_iot.risk_object,hnDev.industry_iot.risk_unit&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;connection.url&#34;: &#34;jdbc:mysql://internal.example.com:3306/industry_iot_prod?characterEncoding=utf-8&amp;autoReconnect=true&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;connection.user&#34;: &#34;root&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;connection.password&#34;: &#34;{{REDACTED}}&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;key.converter.encoding&#34;: &#34;UTF-8&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;value.converter.encoding&#34;: &#34;UTF-8&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;pk.mode&#34;: &#34;record_key&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;insert.mode&#34;: &#34;upsert&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;delete.enabled&#34;: &#34;true&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;batch.size&#34;: &#34;3000&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;auto.create&#34;: &#34;true&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;auto.evolve&#34;: &#34;true&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;transforms&#34;: &#34;dropPrefix,ExtractField,tsFormat1&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;transforms.ExtractField.type&#34;: &#34;org.apache.kafka.connect.transforms.ExtractField$Value&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;transforms.ExtractField.field&#34;: &#34;after&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;transforms.tsFormat1.type&#34;: &#34;org.apache.kafka.connect.transforms.TimestampConverter$Value&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;transforms.tsFormat1.target.type&#34;: &#34;string&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;transforms.tsFormat1.field&#34;: &#34;create_time,modify_time&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;transforms.tsFormat1.format&#34;: &#34;yyyy-MM-dd HH:mm:ss&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;transforms.dropPrefix.type&#34;: &#34;org.apache.kafka.connect.transforms.RegexRouter&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;transforms.dropPrefix.regex&#34;: &#34;hnDev.industry_iot.(.*)&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;transforms.dropPrefix.replacement&#34;: &#34;$1&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;errors.tolerance&#34;: &#34;all&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;errors.deadletterqueue.topic.name&#34;: &#34;hn-dev-errors&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;errors.deadletterqueue.context.headers.enable&#34;: &#34;true&#34;,
+</span></span></span><span class=line><span class=cl><span class=s1>    &#34;errors.log.enable&#34;: &#34;true&#34;
+</span></span></span><span class=line><span class=cl><span class=s1>  }
+</span></span></span><span class=line><span class=cl><span class=s1>}&#39;</span>
+</span></span></code></pre></td></tr></table></div></div><h3 id=43-关键参数解读>4.3 关键参数解读</h3><div class=table-wrapper><table><thead><tr><th>参数</th><th>含义</th></tr></thead><tbody><tr><td><code>pk.mode=record_key</code></td><td>用 topic key 作为目标表主键（必须有主键）</td></tr><tr><td><code>insert.mode=upsert</code></td><td>存在则更新、不存在则插入</td></tr><tr><td><code>auto.create=true</code></td><td>目标表不存在时自动建（<strong>慎用</strong>，生产应提前建好）</td></tr><tr><td><code>auto.evolve=true</code></td><td>自动加字段（DDL 同步）</td></tr><tr><td><code>delete.enabled=true</code></td><td>同步 DELETE 事件</td></tr><tr><td><code>transforms.dropPrefix</code></td><td>用正则去掉 topic 前缀，让表名干净</td></tr><tr><td><code>errors.tolerance=all</code></td><td>出错进死信队列，不中断同步流</td></tr></tbody></table></div><h3 id=44-死信队列dlq>4.4 死信队列（DLQ）</h3><p>启用 DLQ 后<strong>失败的记录</strong>会进指定 topic，方便排查：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-json data-lang=json><span class=line><span class=cl><span class=s2>&#34;errors.tolerance&#34;</span><span class=err>:</span> <span class=s2>&#34;all&#34;</span><span class=err>,</span>
+</span></span><span class=line><span class=cl><span class=s2>&#34;errors.deadletterqueue.topic.name&#34;</span><span class=err>:</span> <span class=s2>&#34;my-connector-errors&#34;</span><span class=err>,</span>
+</span></span><span class=line><span class=cl><span class=s2>&#34;errors.deadletterqueue.context.headers.enable&#34;</span><span class=err>:</span> <span class=s2>&#34;true&#34;</span><span class=err>,</span>
+</span></span><span class=line><span class=cl><span class=s2>&#34;errors.log.enable&#34;</span><span class=err>:</span> <span class=s2>&#34;true&#34;</span><span class=err>,</span>
+</span></span><span class=line><span class=cl><span class=s2>&#34;errors.log.include.messages&#34;</span><span class=err>:</span> <span class=s2>&#34;false&#34;</span>
+</span></span></code></pre></td></tr></table></div></div><hr><h2 id=5-常见坑与排错>5. 常见坑与排错</h2><h3 id=51-recordtoolargeexception>5.1 <code>RecordTooLargeException</code></h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>The message is 1691268 bytes when serialized which is larger than 1048576,
+</span></span><span class=line><span class=cl>which is the value of the max.request.size configuration.
+</span></span></code></pre></td></tr></table></div></div><p><strong>修法</strong>：见 <a class=link href=#33-%e5%85%b3%e9%94%ae%e9%85%8d%e7%bd%ae%e8%b0%83%e5%a4%a7%e6%b6%88%e6%81%af%e4%bd%93>3.3 调大消息体</a>。</p><h3 id=52-failed-to-find-any-class-that-implements-connector-and-which-name-matches-ioconfluentconnectjdbcjdbcsinkconnector>5.2 <code>Failed to find any class that implements Connector and which name matches io.confluent.connect.jdbc.JdbcSinkConnector</code></h3><p>没注册 Sink Connector JAR，<strong>按 4.1 操作</strong>。</p><h3 id=53-no-suitable-driver-found-for-jdbcmysql>5.3 <code>No suitable driver found for jdbc:mysql://...</code></h3><p>没把 MySQL JDBC 驱动 JAR 放到 connect 容器：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>docker cp mysql-connector-java-8.0.23.jar connect:/kafka/connect/kafka-connect-jdbc
+</span></span><span class=line><span class=cl>docker restart connect
+</span></span></code></pre></td></tr></table></div></div><h3 id=54-source-connector-卡在-running-但不消费>5.4 Source Connector 卡在 RUNNING 但不消费</h3><p>查看 task 状态：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>curl http://internal.example.com:8083/connectors/source-hnDev/tasks
+</span></span></code></pre></td></tr></table></div></div><p><code>state=PENDING</code> 多半是历史 topic 恢复中；<code>RUNNING</code> 但 Kafka offset 没变，可能是 binlog 已丢失——把 connector 删了重建并改 <code>snapshot.mode=initial</code>。</p><h3 id=55-时间类型不匹配>5.5 时间类型不匹配</h3><p>Source 是 <code>DATETIME(0)</code> 但 Sink 写入失败。把 <code>time.precision.mode</code> 改成 <code>connect</code> 或在 SMT 里转字符串：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-json data-lang=json><span class=line><span class=cl><span class=s2>&#34;transforms.tsFormat1.type&#34;</span><span class=err>:</span> <span class=s2>&#34;org.apache.kafka.connect.transforms.TimestampConverter$Value&#34;</span><span class=err>,</span>
+</span></span><span class=line><span class=cl><span class=s2>&#34;transforms.tsFormat1.target.type&#34;</span><span class=err>:</span> <span class=s2>&#34;string&#34;</span><span class=err>,</span>
+</span></span><span class=line><span class=cl><span class=s2>&#34;transforms.tsFormat1.field&#34;</span><span class=err>:</span> <span class=s2>&#34;create_time&#34;</span><span class=err>,</span>
+</span></span><span class=line><span class=cl><span class=s2>&#34;transforms.tsFormat1.format&#34;</span><span class=err>:</span> <span class=s2>&#34;yyyy-MM-dd HH:mm:ss&#34;</span>
+</span></span></code></pre></td></tr></table></div></div><h3 id=56-canal-table-meta-tsdb-is-out-of-sync>5.6 Canal &ldquo;table meta tsdb is out of sync&rdquo;</h3><p>canal-server 重启时找不回 binlog 位点。<strong>两种解法</strong>：</p><ol><li>删 <code>/home/admin/canal-server/conf/{instance}/meta.dat</code> 让它重做快照</li><li>在 <code>instance.properties</code> 设 <code>canal.instance.tsdb.db.username/password</code> 把 tsdb 存进 MySQL</li></ol><hr><h2 id=6-生产建议>6. 生产建议</h2><h3 id=61-选型>6.1 选型</h3><ul><li>单向同步（MySQL → MySQL）：<strong>Canal adapter</strong> 最快</li><li>多源聚合：Debezium + JDBC Sink</li><li>强一致 + 转换：Flink CDC + Flink SQL</li></ul><h3 id=62-监控>6.2 监控</h3><div class=table-wrapper><table><thead><tr><th>指标</th><th>工具</th></tr></thead><tbody><tr><td>Canal lag</td><td>canal admin web 页面</td></tr><tr><td>Debezium lag</td><td>JMX <code>debezium.metrics</code> + Prometheus + Grafana</td></tr><tr><td>Kafka consumer lag</td><td><code>kafka-consumer-groups.sh --describe</code></td></tr><tr><td>Sink 写入速率</td><td>JDBC Sink task metrics</td></tr></tbody></table></div><h3 id=63-反向思考什么场景不能用>6.3 反向思考：什么场景不能用？</h3><div class=table-wrapper><table><thead><tr><th>场景</th><th>不建议</th></tr></thead><tbody><tr><td>写入压力已经接近 MySQL 极限</td><td>同步会把 source 和 sink 同时打挂</td></tr><tr><td>频繁 DDL（加列改类型）</td><td>Debezium schema history 会越来越大</td></tr><tr><td>表没有主键</td><td>同步后 upsert 行为不可预期</td></tr><tr><td>大事务（> 1MB）</td><td>需要先调大 <code>max.request.size</code></td></tr></tbody></table></div><h3 id=64-自建镜像>6.4 自建镜像</h3><p><code>canal-adapter</code> 官方镜像老旧、glibc 兼容性差。<strong>生产推荐自建镜像</strong>：</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span><span class=lnt>7
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-dockerfile data-lang=dockerfile><span class=line><span class=cl><span class=c># Dockerfile</span><span class=err>
+</span></span></span><span class=line><span class=cl><span class=k>FROM</span><span class=w> </span><span class=s>lwd/jdk:8u371</span><span class=err>
+</span></span></span><span class=line><span class=cl><span class=k>COPY</span> canal.adapter-1.1.6.tar.gz /tmp/<span class=err>
+</span></span></span><span class=line><span class=cl><span class=k>RUN</span> tar -xzf /tmp/canal.adapter-1.1.6.tar.gz -C /opt/ <span class=o>&amp;&amp;</span> <span class=se>\
+</span></span></span><span class=line><span class=cl>    mv /opt/canal.adapter-1.1.6 /opt/canal-adapter<span class=err>
+</span></span></span><span class=line><span class=cl><span class=k>COPY</span> startup.sh /opt/canal-adapter/bin/<span class=err>
+</span></span></span><span class=line><span class=cl><span class=k>ENTRYPOINT</span> <span class=p>[</span><span class=s2>&#34;/opt/canal-adapter/bin/startup.sh&#34;</span><span class=p>]</span><span class=err>
+</span></span></span></code></pre></td></tr></table></div></div><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>docker build -t local/canal-adapter:v1.1.6 .
+</span></span></code></pre></td></tr></table></div></div><hr><h2 id=下一步>下一步</h2><ul><li><strong>MySQL 备份 + binlog 反解</strong>：见《MySQL 备份恢复实战》</li><li><strong>多库适配（MySQL ↔ PG ↔ 国产）</strong>：见《多数据库适配架构》</li></ul></section><footer class="article-meta article-footer"><section class=article-tags><a href=/tags/mysql/>MySQL</a>
+<a href=/tags/canal/>Canal</a>
+<a href=/tags/debezium/>Debezium</a>
+<a href=/tags/kafka-connect/>Kafka Connect</a>
+<a href=/tags/%E6%95%B0%E6%8D%AE%E5%90%8C%E6%AD%A5/>数据同步</a>
+<a href=/tags/cdc/>CDC</a></section><section class="article-copyright inline-meta"><svg class="icon icon-tabler icon-tabler-copyright" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="12" cy="12" r="9"/><path d="M14.5 9a3.5 4 0 100 6"/></svg>
+<span>本作品采用 CC BY-NC-SA 4.0 协议进行许可</span></section></footer></article><aside><h2 class=section-title>相关文章</h2><div class=subsection-list><div class=article-list--tile><article class=has-image><a href=/p/mysql-user-grant-and-troubleshooting/><div class=article-image><img alt="Featured image of post MySQL 用户权限与安全实战：账号、密码、远程连接与排错" height=150 loading=lazy src=/p/mysql-user-grant-and-troubleshooting/image/cover_hu_bb395da0f6cb831d.jpg srcset="/p/mysql-user-grant-and-troubleshooting/image/cover_hu_bb395da0f6cb831d.jpg 1x, /p/mysql-user-grant-and-troubleshooting/image/cover_hu_eaade1d35f1018d6.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#303a5b80 0%,#605cbfC0 100%)"><h2 class=article-title>MySQL 用户权限与安全实战：账号、密码、远程连接与排错</h2></div></a></article><article class=has-image><a href=/p/mysql-backup-and-restore/><div class=article-image><img alt="Featured image of post MySQL 备份恢复实战：mysqldump + ibd2sql + binlog2sql + cron" height=150 loading=lazy src=/p/mysql-backup-and-restore/image/cover_hu_5cf62169252cbbb7.jpg srcset="/p/mysql-backup-and-restore/image/cover_hu_5cf62169252cbbb7.jpg 1x, /p/mysql-backup-and-restore/image/cover_hu_6834c7aa6a934e1f.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#303a5c80 0%,#605cbfC0 100%)"><h2 class=article-title>MySQL 备份恢复实战：mysqldump + ibd2sql + binlog2sql + cron</h2></div></a></article><article class=has-image><a href=/p/mysql-slow-query-and-performance-tuning/><div class=article-image><img alt="Featured image of post MySQL 慢查询与性能调优：sysbench 压测 + buffer pool + 锁表排查" height=150 loading=lazy src=/p/mysql-slow-query-and-performance-tuning/image/cover_hu_c10d117484631334.jpg srcset="/p/mysql-slow-query-and-performance-tuning/image/cover_hu_c10d117484631334.jpg 1x, /p/mysql-slow-query-and-performance-tuning/image/cover_hu_fd747ae83b28370a.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#4b4e9180 0%,#343d60C0 100%)"><h2 class=article-title>MySQL 慢查询与性能调优：sysbench 压测 + buffer pool + 锁表排查</h2></div></a></article><article class=has-image><a href=/p/mysql-explain-and-sql-patterns/><div class=article-image><img alt="Featured image of post MySQL 实战速查：EXPLAIN 全字段解读 + 经典 SQL 题解" height=150 loading=lazy src=/p/mysql-explain-and-sql-patterns/image/cover_hu_732cb33507a8747e.jpg srcset="/p/mysql-explain-and-sql-patterns/image/cover_hu_732cb33507a8747e.jpg 1x, /p/mysql-explain-and-sql-patterns/image/cover_hu_128e20d428672afc.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#313b5c80 0%,#605cbfC0 100%)"><h2 class=article-title>MySQL 实战速查：EXPLAIN 全字段解读 + 经典 SQL 题解</h2></div></a></article><article class=has-image><a href=/p/mysql-index-optimization-case/><div class=article-image><img alt="Featured image of post MySQL 索引优化实战：700 万行表从 3 秒到 50 毫秒" height=150 loading=lazy src=/p/mysql-index-optimization-case/image/cover_hu_1c2c49ba3e62f1a5.jpg srcset="/p/mysql-index-optimization-case/image/cover_hu_1c2c49ba3e62f1a5.jpg 1x, /p/mysql-index-optimization-case/image/cover_hu_9169e04d764c4694.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#afb4c180 0%,#323b5cC0 100%)"><h2 class=article-title>MySQL 索引优化实战：700 万行表从 3 秒到 50 毫秒</h2></div></a></article></div></div></aside><script src=https://giscus.app/client.js data-repo=liangweidonggood/liangweidonggood.github.io data-repo-id="MDEwOlJlcG9zaXRvcnkxMDIzMzI5MjE=" data-category=Announcements data-category-id=DIC_kwDOBhl5-c4C-ZwO data-mapping=pathname data-strict=0 data-reactions-enabled=1 data-emit-metadata=0 data-input-position=bottom data-theme=light data-lang=zh-CN data-loading=lazy crossorigin=anonymous async></script><script>function setGiscusTheme(e){let t=document.querySelector("iframe.giscus-frame");t&&t.contentWindow.postMessage({giscus:{setConfig:{theme:e}}},"https://giscus.app")}(function(){addEventListener("message",t=>{if(event.origin!=="https://giscus.app")return;e()}),window.addEventListener("onColorSchemeChange",e);function e(){setGiscusTheme(document.documentElement.dataset.scheme==="light"?"light":"dark_dimmed")}})()</script><footer class=site-footer><section class=copyright>&copy;
+2006 -
+2026 Liangweidong's blog</section><section class=powerby>使用 <a href=https://gohugo.io/ target=_blank rel=noopener>Hugo</a> 构建<br>主题 <b><a href=https://github.com/CaiJimmy/hugo-theme-stack target=_blank rel=noopener data-version=4.0.3>Stack</a></b> 由 <a href=https://jimmycai.com target=_blank rel=noopener>Jimmy</a> 设计</section></footer><script type=module>
+    import gallery from '\/ts\/gallery.js';
+
+    const articleContent = document.querySelector('.article-content');
+    const shouldLoad = articleContent && (articleContent.querySelectorAll('figure').length > 0 || articleContent.querySelectorAll('img.gallery-image').length > 0);
+    
+    if (shouldLoad) {
+        gallery(articleContent);
+
+        const PhotoSwipeLightbox = (await import("https:\/\/cdn.jsdelivr.net\/npm\/photoswipe@5.4.4\/dist\/photoswipe-lightbox.esm.min.js")).default;
+        const styleHref = "https:\/\/cdn.jsdelivr.net\/npm\/photoswipe@5.4.4\/dist\/photoswipe.css";
+
+        const styleTag = document.createElement('link');
+        styleTag.rel = 'stylesheet';
+        styleTag.href = styleHref;
+        document.head.appendChild(styleTag);
+
+        const lightbox = new PhotoSwipeLightbox({
+            gallerySelector: '.article-content',
+            childSelector: 'figure a.image-link',
+            pswpModule: () => import("https:\/\/cdn.jsdelivr.net\/npm\/photoswipe@5.4.4\/dist\/photoswipe.esm.min.js")
+        });
+        lightbox.init();
+    }
+</script></main></div><script type=text/javascript src=/ts/main.f856840516f7c2ad1769a8f5937e3d08d6cb386e2cd2dd025ae696e0ff207958.js defer></script></body></html>

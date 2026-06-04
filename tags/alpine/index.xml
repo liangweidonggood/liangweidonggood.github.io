@@ -1,0 +1,618 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Alpine on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/alpine/</link><description>Recent content in Alpine on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Sun, 15 Dec 2024 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/alpine/index.xml" rel="self" type="application/rss+xml"/><item><title>JDK 自建镜像实战：从 JDK 8 到 JDK 21 的三大流派</title><link>https://liangweidonggood.github.io/p/jdk-zi-jian-jingxiang-shizhan/</link><pubDate>Sun, 15 Dec 2024 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/jdk-zi-jian-jingxiang-shizhan/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/jdk-zi-jian-jingxiang-shizhan/image/cover.jpg" alt="Featured image of post JDK 自建镜像实战：从 JDK 8 到 JDK 21 的三大流派" /&gt;&lt;p&gt;在企业里跑 Java 容器，最常见的一条路是 &lt;code&gt;docker pull openjdk:8&lt;/code&gt; 然后把 jar 塞进去。但稍微严肃一点的场景——生产环境要可控、要带字体、要带时区、要 wait 启动——都会走向&lt;strong&gt;自建 JDK 基础镜像&lt;/strong&gt;这条路。这篇把 5 年间从 JDK 8u333 一直到 JDK 21 的演进整理一遍，把踩过的坑一次说清楚。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;阅读对象&lt;/strong&gt;：需要维护 Java 应用基础镜像的运维 / 后端工程师
+&lt;strong&gt;覆盖范围&lt;/strong&gt;：JDK 8u333 / 8u351 / 8u371 / 8u381 / 8u401（Alpine）/ JDK 21 + Debian / Ubuntu / Alpine 三大基础镜像流派 + wait-for-it 启动 + 中文乱码 + 字体 + 时区 + TLS 1.0/1.1 兼容&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="一为什么需要自建-jdk-基础镜像"&gt;一、为什么需要自建 JDK 基础镜像
+&lt;/h2&gt;&lt;p&gt;官方 &lt;code&gt;openjdk&lt;/code&gt; 镜像有两个&amp;quot;够用但不舒服&amp;quot;的地方：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;时区不是上海&lt;/strong&gt;：容器里 &lt;code&gt;date&lt;/code&gt; 永远差 8 小时，&lt;strong&gt;日志时间戳对不上排查窗口&lt;/strong&gt;特别痛苦&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;没有字体&lt;/strong&gt;：用到图形验证码、PDF 导出、POI 操作 Excel 的应用，&lt;strong&gt;直接 OOM 崩溃&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;没有 &lt;code&gt;wait.sh&lt;/code&gt;&lt;/strong&gt;：微服务启动顺序错乱，A 服务没等 B 服务的注册中心起来就启动&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;没有 &lt;code&gt;tzdata&lt;/code&gt; / &lt;code&gt;curl&lt;/code&gt; / &lt;code&gt;iputils-ping&lt;/code&gt; 等常用工具&lt;/strong&gt;：调试时 &lt;code&gt;ping&lt;/code&gt; / &lt;code&gt;nslookup&lt;/code&gt; 找不到，&lt;strong&gt;只能 exec 进去手动装&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;自建基础镜像的本质是：把这些&amp;quot;跑生产迟早要的东西&amp;quot;&lt;strong&gt;预先 bake 进去&lt;/strong&gt;，业务镜像只关心应用本身。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;When to use&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;一个团队有 ≥ 3 个 Java 微服务需要部署 → 必须自建 JDK 基础镜像&lt;/li&gt;
+&lt;li&gt;公司内部有&amp;quot;安全合规&amp;quot;要求，必须用某特定 JDK 版本 / 特定 OS → 自建&lt;/li&gt;
+&lt;li&gt;单个临时 demo → 没必要，&lt;code&gt;openjdk:8-jre-slim&lt;/code&gt; 凑合用&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="二debian-流派jdk-8u371--8u381"&gt;二、Debian 流派：JDK 8u371 / 8u381
+&lt;/h2&gt;&lt;p&gt;Debian 11 是 JDK 8 / 11 时代最稳的基础镜像——&lt;strong&gt;包管理 apt 完善、镜像体积可控、对 glibc 应用兼容好&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="21-基础-dockerfile"&gt;2.1 基础 Dockerfile
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-dockerfile" data-lang="dockerfile"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;FROM&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;debian:11.8&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;LABEL&lt;/span&gt; &lt;span class="nv"&gt;maintainer&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;ops@example.com&amp;#34;&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;WORKDIR /&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; mkdir /usr/local/jdk &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; chmod &lt;span class="m"&gt;777&lt;/span&gt; /usr/local/jdk&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ADD&lt;/span&gt; jdk-8u381-linux-x64.tar.gz /usr/local/jdk&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; JAVA_HOME /usr/local/jdk/jdk1.8.0_381&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;CLASSPATH&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/bin:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/lib:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/jre/lib&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;PATH&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;.:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/bin:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/jre/bin:&lt;span class="nv"&gt;$PATH&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; LANG C.UTF-8&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;TZ&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;Asia/Shanghai &lt;span class="nv"&gt;DEBIAN_FRONTEND&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;noninteractive&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; ln -fs /usr/share/zoneinfo/&lt;span class="si"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;TZ&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; /etc/localtime &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="si"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;TZ&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; &amp;gt; /etc/timezone &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; dpkg-reconfigure --frontend noninteractive tzdata &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; rm -rf /var/lib/apt/lists/*&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;关键点&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;LABEL maintainer&lt;/code&gt; 用部门邮箱而非个人邮箱，避免人员流动留下旧地址&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;ENV LANG C.UTF-8&lt;/code&gt; 解决&lt;strong&gt;Java 应用中文乱码&lt;/strong&gt;最常见原因&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;dpkg-reconfigure tzdata&lt;/code&gt; 让 &lt;code&gt;java.util.Date&lt;/code&gt; 也走上海时区（不是只改了 &lt;code&gt;/etc/localtime&lt;/code&gt;）&lt;/li&gt;
+&lt;li&gt;末尾 &lt;code&gt;rm -rf /var/lib/apt/lists/*&lt;/code&gt; &lt;strong&gt;必须保留&lt;/strong&gt;，否则镜像会大 100MB+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="22-镜像版本演进"&gt;2.2 镜像版本演进
+&lt;/h3&gt;&lt;p&gt;实战中一个 JDK 8u381 基础镜像可能要经过 5~6 次迭代：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;Tag&lt;/th&gt;
+					&lt;th&gt;增加的能力&lt;/th&gt;
+					&lt;th&gt;触发场景&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;8u381&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;基础 JDK + 时区&lt;/td&gt;
+					&lt;td&gt;第一次发版&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;8u381-2&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;+ 中文字体（fontconfig）&lt;/td&gt;
+					&lt;td&gt;应用导出 PDF 报错&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;8u381-3&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;+ &lt;code&gt;dmidecode&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;arthas / sigar 读硬件信息&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;8u381-4&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;+ TLS 1.0 / 1.1 启用&lt;/td&gt;
+					&lt;td&gt;接入老客户的 HTTPS 服务&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;8u381-5&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;合并 -3 和 -4 全部能力&lt;/td&gt;
+					&lt;td&gt;版本归一&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;8u381-6&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;+ skywalking agent + arthas-boot.jar&lt;/td&gt;
+					&lt;td&gt;接入分布式追踪&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;8u381-7&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;+ 第三方 SDK（硬盘录像机 .so）&lt;/td&gt;
+					&lt;td&gt;视频监控项目&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;8u381-8&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;+ mysqldump / mysql 客户端&lt;/td&gt;
+					&lt;td&gt;容器内做 DB 备份&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;strong&gt;经验法则&lt;/strong&gt;：每加一个能力就 +1 版本号，&lt;strong&gt;永远不要覆盖旧 tag&lt;/strong&gt;——历史容器用的就是旧镜像，回头调试时还能拉下来。&lt;/p&gt;
+&lt;h3 id="23-时区必须做两件事"&gt;2.3 时区必须做两件事
+&lt;/h3&gt;&lt;p&gt;只改 &lt;code&gt;/etc/localtime&lt;/code&gt; 不够。完整做法：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 1. 软链时区文件&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 2. 写 timezone 文件（apt 工具会读这个）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;&amp;#34;Asia/Shanghai&amp;#34;&lt;/span&gt; &amp;gt; /etc/timezone
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 3. 让 glibc 知道&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;dpkg-reconfigure --frontend noninteractive tzdata
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;第 3 步会更新 &lt;code&gt;/etc/localtime&lt;/code&gt; 并设置内部状态。&lt;strong&gt;不执行第 3 步时 &lt;code&gt;date&lt;/code&gt; 命令对，&lt;code&gt;new Date()&lt;/code&gt; 错&lt;/strong&gt;——Java 用的是 glibc 内部状态。&lt;/p&gt;
+&lt;h3 id="24-wait-for-it解决启动顺序"&gt;2.4 wait-for-it：解决启动顺序
+&lt;/h3&gt;&lt;p&gt;微服务 &lt;code&gt;xjAuth&lt;/code&gt; 依赖 nacos 先启动，&lt;strong&gt;直接 &lt;code&gt;depends_on&lt;/code&gt; 没用&lt;/strong&gt;——Docker 只控制启动顺序，不等待端口。&lt;/p&gt;
+&lt;p&gt;引入 &lt;code&gt;wait.sh&lt;/code&gt;（基于 &lt;code&gt;wait-for-it.sh&lt;/code&gt;）：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -d --name xjAuth &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --network_mode: &lt;span class="s2"&gt;&amp;#34;host&amp;#34;&lt;/span&gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &amp;lt;your-public-ip&amp;gt;:13001/base/lwd/jdk:8u381 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; /wait.sh localhost:8848 -t &lt;span class="m"&gt;0&lt;/span&gt; -- java -jar /jar/xjrsoft-auth.jar
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;code&gt;wait.sh&lt;/code&gt; 会先阻塞直到 &lt;code&gt;localhost:8848&lt;/code&gt; 可达，再 exec 真正启动命令。&lt;code&gt;-t 0&lt;/code&gt; 表示&lt;strong&gt;无限等待&lt;/strong&gt;（生产推荐，避免临时网络抖动让容器直接退出）。&lt;/p&gt;
+&lt;p&gt;实战日志：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-text" data-lang="text"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;wait.sh: waiting for localhost:8848 without a timeout
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;wait.sh: localhost:8848 is available after 23 seconds
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="三ubuntu-流派jdk-8u333--8u351"&gt;三、Ubuntu 流派：JDK 8u333 / 8u351
+&lt;/h2&gt;&lt;p&gt;Ubuntu 适合&lt;strong&gt;老系统延续&lt;/strong&gt;——&lt;code&gt;ubuntu:22.10&lt;/code&gt; / &lt;code&gt;22.04&lt;/code&gt; 都有官方仓库支持。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-dockerfile" data-lang="dockerfile"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;FROM&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;ubuntu:22.10&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;MAINTAINER&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;ops@example.com&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;WORKDIR&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;./usr/local&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; mkdir jdk &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; chmod &lt;span class="m"&gt;777&lt;/span&gt; /usr/local/jdk&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ADD&lt;/span&gt; jdk-8u351-linux-x64.tar.gz /usr/local/jdk&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; JAVA_HOME /usr/local/jdk/jdk1.8.0_351&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;CLASSPATH&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/bin:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/lib:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/jre/lib&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;PATH&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;.:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/bin:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/jre/bin:&lt;span class="nv"&gt;$PATH&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;注意：Ubuntu 基础镜像&lt;strong&gt;默认没有 ca-certificates&lt;/strong&gt;——HTTPS 请求会报 &lt;code&gt;x509: certificate signed by unknown authority&lt;/code&gt;。要么 &lt;code&gt;apt install -y ca-certificates&lt;/code&gt;，要么用 &lt;code&gt;wget --no-check-certificate&lt;/code&gt;（不推荐）。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="四alpine-流派jdk-8u401极致小"&gt;四、Alpine 流派：JDK 8u401（极致小）
+&lt;/h2&gt;&lt;p&gt;Alpine 用 musl libc 而非 glibc，&lt;strong&gt;镜像只有 5MB 级别&lt;/strong&gt;——但 JDK 跑在 Alpine 上要绕开 glibc 依赖。&lt;/p&gt;
+&lt;h3 id="41-坑alpine-自带-musljava-跑不动"&gt;4.1 坑：Alpine 自带 musl，Java 跑不动
+&lt;/h3&gt;&lt;p&gt;解决方案：装 &lt;a class="link" href="https://github.com/sgerrand/alpine-pkg-glibc" target="_blank" rel="noopener"
+ &gt;sgerrand/alpine-pkg-glibc&lt;/a&gt; 包。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;span class="lnt"&gt;18
+&lt;/span&gt;&lt;span class="lnt"&gt;19
+&lt;/span&gt;&lt;span class="lnt"&gt;20
+&lt;/span&gt;&lt;span class="lnt"&gt;21
+&lt;/span&gt;&lt;span class="lnt"&gt;22
+&lt;/span&gt;&lt;span class="lnt"&gt;23
+&lt;/span&gt;&lt;span class="lnt"&gt;24
+&lt;/span&gt;&lt;span class="lnt"&gt;25
+&lt;/span&gt;&lt;span class="lnt"&gt;26
+&lt;/span&gt;&lt;span class="lnt"&gt;27
+&lt;/span&gt;&lt;span class="lnt"&gt;28
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-dockerfile" data-lang="dockerfile"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;FROM&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;alpine:v3.19.1&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;LABEL&lt;/span&gt; &lt;span class="nv"&gt;author&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;ops&amp;#34;&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;WORKDIR&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;/opt&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;# 1. 换 Alpine 源到清华&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; sed -i &lt;span class="s1"&gt;&amp;#39;s/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g&amp;#39;&lt;/span&gt; /etc/apk/repositories&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; apk update &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; apk upgrade&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;# 2. 装 ca-certificates&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; apk --no-cache --upgrade add ca-certificates&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;# 3. 装 glibc（关键！）&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ADD&lt;/span&gt; sgerrand.rsa.pub /etc/apk/keys/sgerrand.rsa.pub&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;COPY&lt;/span&gt; glibc-2.35-r1.apk glibc-bin-2.35-r1.apk glibc-dev-2.35-r1.apk glibc-i18n-2.35-r1.apk /opt/&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; apk add --no-cache --force-overwrite glibc-2.35-r1.apk &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; glibc-bin-2.35-r1.apk glibc-dev-2.35-r1.apk glibc-i18n-2.35-r1.apk &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; rm -f glibc-*.apk&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;# 4. 装时区数据&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; apk add --no-cache tzdata &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;# 5. 装中文字体（alpine 3.15+ 必需，否则图形验证码 OOM）&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; apk add --no-cache fontconfig&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;# 6. 解压 JDK&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ADD&lt;/span&gt; jdk-8u401-linux-x64.tar.gz /opt&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;# 7. 环境变量&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;JAVA_HOME&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;/opt/jdk1.8.0_401&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;JRE_HOME&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;/opt/jdk1.8.0_401/jre&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;CLASS_PATH&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;.:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/lib/dt.jar:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/lib/tools.jar:&lt;span class="nv"&gt;$JRE_HOME&lt;/span&gt;/lib&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;PATH&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nv"&gt;$PATH&lt;/span&gt;:&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/bin:&lt;span class="nv"&gt;$JRE_HOME&lt;/span&gt;/bin&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;# 8. 软链 ld-linux 解决库文件报错&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; ln -sf /usr/glibc-compat/lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;CMD&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;java&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s2"&gt;&amp;#34;-version&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="42-镜像大小对比"&gt;4.2 镜像大小对比
+&lt;/h3&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;基础镜像&lt;/th&gt;
+					&lt;th&gt;JDK 8u401 后大小&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;debian:11.8&lt;/code&gt; + JDK 8u381&lt;/td&gt;
+					&lt;td&gt;~ 800 MB&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;ubuntu:22.10&lt;/code&gt; + JDK 8u351&lt;/td&gt;
+					&lt;td&gt;~ 750 MB&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;alpine:v3.19.1&lt;/code&gt; + JDK 8u401 + glibc&lt;/td&gt;
+					&lt;td&gt;~ 350 MB&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;Alpine 省了一半体积，&lt;strong&gt;冷启动时间和拉取速度都更友好&lt;/strong&gt;——但 &lt;code&gt;apk add&lt;/code&gt; 包要慎重（musl 与 glibc 二进制不兼容）。&lt;/p&gt;
+&lt;h2 id="五jdk-21新时代的开端"&gt;五、JDK 21：新时代的开端
+&lt;/h2&gt;&lt;p&gt;JDK 21 是 LTS（2023-09 发布，&lt;strong&gt;支持到 2031 年&lt;/strong&gt;），如果新项目可以直接上 21。&lt;/p&gt;
+&lt;h3 id="51-liberica-jdk-21-dockerfile"&gt;5.1 Liberica JDK 21 Dockerfile
+&lt;/h3&gt;&lt;p&gt;Liberica 是 BellSoft 出品的 OpenJDK 发行版，&lt;strong&gt;支持 alpine 和 glibc 两种打包&lt;/strong&gt;，省心：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;span class="lnt"&gt;18
+&lt;/span&gt;&lt;span class="lnt"&gt;19
+&lt;/span&gt;&lt;span class="lnt"&gt;20
+&lt;/span&gt;&lt;span class="lnt"&gt;21
+&lt;/span&gt;&lt;span class="lnt"&gt;22
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-dockerfile" data-lang="dockerfile"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;FROM&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;debian:12.12&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;LABEL&lt;/span&gt; &lt;span class="nv"&gt;maintainer&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;ops@example.com&amp;#34;&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;LABEL&lt;/span&gt; &lt;span class="nv"&gt;description&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;Debian 12.12 + BellSoft Liberica JDK 21&amp;#34;&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; mkdir /usr/local/jdk &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; chmod &lt;span class="m"&gt;755&lt;/span&gt; /usr/local/jdk&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ADD&lt;/span&gt; bellsoft-jdk21.0.5+11-linux-amd64-full.tar.gz /usr/local/jdk&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; JAVA_HOME /usr/local/jdk/jdk-21.0.5-full&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;PATH&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/bin:&lt;span class="nv"&gt;$PATH&lt;/span&gt;:.&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; LANG C.UTF-8&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;ENV&lt;/span&gt; &lt;span class="nv"&gt;TZ&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;Asia/Shanghai &lt;span class="nv"&gt;DEBIAN_FRONTEND&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;noninteractive&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; sed -i &lt;span class="s1"&gt;&amp;#39;s|URIs: http://deb.debian.org/debian|URIs: http://mirrors.ustc.edu.cn/debian|g&amp;#39;&lt;/span&gt; /etc/apt/sources.list.d/debian.sources &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; apt clean &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; apt update &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; apt install -y --no-install-recommends fontconfig &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; ln -snf /usr/share/zoneinfo/&lt;span class="si"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;TZ&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; /etc/localtime &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="si"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;TZ&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; &amp;gt; /etc/timezone &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; fc-cache -fv &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; rm -rf /var/lib/apt/lists/* &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; java -version &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; javac -version&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;WORKDIR&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;/app&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="52-jdk-21-的-virtual-thread"&gt;5.2 JDK 21 的 Virtual Thread
+&lt;/h3&gt;&lt;p&gt;JDK 21 的最大亮点是 &lt;strong&gt;Virtual Thread&lt;/strong&gt;（虚拟线程，JEP 444）——轻量级线程，&lt;strong&gt;百万级并发&lt;/strong&gt;不再是梦想：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;// 旧写法：平台线程&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;Thread&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;startVirtualThread&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;handleRequest&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;request&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;});&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;// Spring Boot 3.2+ 自动集成&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;spring&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;threads&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;virtual&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;enabled&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;实战效果&lt;/strong&gt;：同等 QPS 下，线程数从 200 降到 50，&lt;strong&gt;P99 延迟下降 30%&lt;/strong&gt;。这是 JDK 21 值得升级的核心动力。&lt;/p&gt;
+&lt;h2 id="六典型坑位"&gt;六、典型坑位
+&lt;/h2&gt;&lt;h3 id="61-中文乱码三连击"&gt;6.1 中文乱码三连击
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;症状&lt;/strong&gt;：Java 应用读 CSV 出现 &lt;code&gt;???&lt;/code&gt;、写 MySQL 中文 &lt;code&gt;?&lt;/code&gt;、导出 PDF &lt;code&gt;□&lt;/code&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;排查顺序&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 1. 看 locale&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker &lt;span class="nb"&gt;exec&lt;/span&gt; -it app locale
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 期望：C C.UTF-8 POSIX en_US.utf8&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 2. 看 JDK 编码&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker &lt;span class="nb"&gt;exec&lt;/span&gt; -it app java -XshowSettings:properties -version 2&amp;gt;&lt;span class="p"&gt;&amp;amp;&lt;/span&gt;&lt;span class="m"&gt;1&lt;/span&gt; &lt;span class="p"&gt;|&lt;/span&gt; grep encoding
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 期望：file.encoding = UTF-8&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 3. 看 MySQL 客户端字符集&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker &lt;span class="nb"&gt;exec&lt;/span&gt; -it app locale -a &lt;span class="p"&gt;|&lt;/span&gt; grep -i utf
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;根治方案&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Dockerfile 加 &lt;code&gt;ENV LANG C.UTF-8&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;JVM 参数加 &lt;code&gt;-Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;MySQL 连接串加 &lt;code&gt;useUnicode=true&amp;amp;characterEncoding=UTF-8&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="62-tls-10--11-兼容"&gt;6.2 TLS 1.0 / 1.1 兼容
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;症状&lt;/strong&gt;：对接老客户的 HTTPS 接口报 &lt;code&gt;SSLHandshakeException&lt;/code&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;原因&lt;/strong&gt;：JDK 8u381 默认 &lt;code&gt;jdk.tls.disabledAlgorithms=SSLv3, TLSv1, TLSv1.1, ...&lt;/code&gt;，TLS 1.0/1.1 被禁用。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;修复&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;vim &lt;span class="nv"&gt;$JAVA_HOME&lt;/span&gt;/jre/lib/security/java.security
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 找到 jdk.tls.disabledAlgorithms&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 删掉 TLSv1, TLSv1.1&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;jdk.tls.disabledAlgorithms&lt;span class="o"&gt;=&lt;/span&gt;SSLv3, RC4, DES, MD5withRSA, &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; DH keySize &amp;lt; 1024, EC keySize &amp;lt; 224, anon, NULL, &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; include jdk.disabled.namedCurves
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;注意&lt;/strong&gt;：TLS 1.0/1.1 已不安全，&lt;strong&gt;只在必须对接老客户时开&lt;/strong&gt;。新项目应该让客户升级到 TLS 1.2+。&lt;/p&gt;
+&lt;h3 id="63-容器内-ping--ip-找不到"&gt;6.3 容器内 &lt;code&gt;ping&lt;/code&gt; / &lt;code&gt;ip&lt;/code&gt; 找不到
+&lt;/h3&gt;&lt;p&gt;Debian 镜像默认最小化，连 &lt;code&gt;ping&lt;/code&gt; 都没有：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-dockerfile" data-lang="dockerfile"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; apt install -y iputils-ping iproute2 dnsutils curl wget&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="七jenkins-agent-镜像"&gt;七、Jenkins Agent 镜像
+&lt;/h2&gt;&lt;p&gt;CI/CD 场景需要 JNLP 客户端连 Jenkins Master：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-dockerfile" data-lang="dockerfile"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;FROM&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;dockerhub.example.com/base/jenkins/inbound-agent:latest-jdk21&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;USER&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;root&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;COPY&lt;/span&gt; jenkins /usr/local/bin/jenkins&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;RUN&lt;/span&gt; chmod +x /usr/local/bin/jenkins&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;USER&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;jenkins&lt;/span&gt;&lt;span class="err"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;配套 &lt;code&gt;Jenkinsfile&lt;/code&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;span class="lnt"&gt;18
+&lt;/span&gt;&lt;span class="lnt"&gt;19
+&lt;/span&gt;&lt;span class="lnt"&gt;20
+&lt;/span&gt;&lt;span class="lnt"&gt;21
+&lt;/span&gt;&lt;span class="lnt"&gt;22
+&lt;/span&gt;&lt;span class="lnt"&gt;23
+&lt;/span&gt;&lt;span class="lnt"&gt;24
+&lt;/span&gt;&lt;span class="lnt"&gt;25
+&lt;/span&gt;&lt;span class="lnt"&gt;26
+&lt;/span&gt;&lt;span class="lnt"&gt;27
+&lt;/span&gt;&lt;span class="lnt"&gt;28
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-groovy" data-lang="groovy"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;pipeline&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;agent&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;kubernetes&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;cloud&lt;/span&gt; &lt;span class="s1"&gt;&amp;#39;k8s&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;inheritFrom&lt;/span&gt; &lt;span class="s1"&gt;&amp;#39;jnlp-slave&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;namespace&lt;/span&gt; &lt;span class="s1"&gt;&amp;#39;kube-ops&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;environment&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;time_now&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;createVersion&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;tools&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;jdk&lt;/span&gt; &lt;span class="s1"&gt;&amp;#39;jdk1.8&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;maven&lt;/span&gt; &lt;span class="s1"&gt;&amp;#39;maven3.9.6&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;stages&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;stage&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;get releaseHost&amp;#34;&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;steps&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;script&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;sh&lt;/span&gt; &lt;span class="s1"&gt;&amp;#39;jenkins -h&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kt"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;createVersion&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nf"&gt;Date&lt;/span&gt;&lt;span class="o"&gt;().&lt;/span&gt;&lt;span class="na"&gt;format&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;yyyy-MM-dd&amp;#39;T&amp;#39;HH-mm-ss&amp;#34;&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;TimeZone&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getTimeZone&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;Asia/Shanghai&amp;#34;&lt;/span&gt;&lt;span class="o"&gt;))&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="s2"&gt;&amp;#34;_${env.BUILD_ID}&amp;#34;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="八镜像分发自建-vs-docker-hub"&gt;八、镜像分发：自建 vs Docker Hub
+&lt;/h2&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;方案&lt;/th&gt;
+					&lt;th&gt;适用场景&lt;/th&gt;
+					&lt;th&gt;优缺点&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;自建 Harbor&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;企业内网 / 等保合规&lt;/td&gt;
+					&lt;td&gt;速度快、可扫描 CVE、可审计；但要维护 Harbor&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;Docker Hub 私有仓库&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;小团队 / 个人&lt;/td&gt;
+					&lt;td&gt;零运维；但国内拉取慢、可能泄露&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;阿里云容器镜像 ACR&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;国内企业&lt;/td&gt;
+					&lt;td&gt;国内快、便宜；但要绑定阿里云账号&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;strong&gt;生产推荐&lt;/strong&gt;：Harbor + 跨地域复制。构建在 &lt;code&gt;北方节点&lt;/code&gt;，自动同步到 &lt;code&gt;华东 / 华南 / 华北&lt;/code&gt; 三个 Harbor。&lt;/p&gt;
+&lt;h2 id="九构建与分发完整命令"&gt;九、构建与分发完整命令
+&lt;/h2&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 1. 构建&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker build -f Dockerfile -t dockerhub.example.com/base/lwd/jdk:8u381-2 .
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 2. 验证&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run --rm dockerhub.example.com/base/lwd/jdk:8u381-2 java -version
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run --rm dockerhub.example.com/base/lwd/jdk:8u381-2 date
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 3. 推 Harbor&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker login -u admin -p &lt;span class="o"&gt;{{&lt;/span&gt;REDACTED&lt;span class="o"&gt;}}&lt;/span&gt; dockerhub.example.com
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker push dockerhub.example.com/base/lwd/jdk:8u381-2
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 4. 离线分发（内网或保密环境）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker save dockerhub.example.com/base/lwd/jdk:8u381-2 &amp;gt; jdk8u381-2.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker load &amp;lt; jdk8u381-2.tar
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="十最佳实践清单"&gt;十、最佳实践清单
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;版本号带具体 patch 号&lt;/strong&gt;：&lt;code&gt;8u381&lt;/code&gt; 而非 &lt;code&gt;8&lt;/code&gt;，便于回溯&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;基础镜像锁版本&lt;/strong&gt;：&lt;code&gt;debian:11.8&lt;/code&gt; 而非 &lt;code&gt;debian:latest&lt;/code&gt;，避免某天突然构建失败&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;时区三步走&lt;/strong&gt;：软链 + timezone 文件 + dpkg-reconfigure&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;wait 脚本必装&lt;/strong&gt;：微服务架构 90% 的&amp;quot;启动失败&amp;quot;都是顺序问题&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;字体必装&lt;/strong&gt;：Alpine 3.15+、Debian 12+ 都需要 &lt;code&gt;apt install fontconfig&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;TLS 兼容性单独 tag&lt;/strong&gt;：避免一个基础镜像同时承担新客户和老客户的兼容要求&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;MySQL 客户端单独 tag&lt;/strong&gt;：不是所有 Java 应用都需要它，按需装&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="2024-视角补充"&gt;2024+ 视角补充
+&lt;/h2&gt;&lt;p&gt;本文写于 2024-12，2025-2026 期间 JDK 自建镜像关键演进：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;JDK 21 / 25 主流化&lt;/strong&gt;：JDK 25（2025-09 发布）已成为新 LTS（支持到 2033+）——&lt;strong&gt;2025+ 新项目强烈推荐 JDK 25&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;JDK 8u421+ / 8u431+ 维护更新&lt;/strong&gt;：Oracle 仍给付费用户提供 JDK 8 季度更新；开源社区转向 &lt;strong&gt;Eclipse Temurin 8u432+&lt;/strong&gt;（2025+ 仍维护）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Eclipse Temurin 17 / 21 / 25&lt;/strong&gt;：&lt;strong&gt;2024-2026 容器首选&lt;/strong&gt;——多平台 + LTS 支持 + 商业保障&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;BellSoft Liberica JDK 21+&lt;/strong&gt;：&lt;strong&gt;Alpine / glibc / CRaC 三种打包&lt;/strong&gt;——云原生首选&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;GraalVM JDK 21+&lt;/strong&gt;：&lt;strong&gt;AOT 编译&lt;/strong&gt; + &lt;strong&gt;Native Image&lt;/strong&gt; + &lt;strong&gt;Truffle 多语言&lt;/strong&gt;——Serverless 首选&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Azul Zulu Prime 17 / 21&lt;/strong&gt;：&lt;strong&gt;C4 Pauseless GC&lt;/strong&gt;（亚毫秒 GC）——金融 / 电信级延迟敏感&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Amazon Corretto 21+&lt;/strong&gt;：AWS 维护，&lt;strong&gt;生产级 LTS&lt;/strong&gt;——AWS 用户首选&lt;/li&gt;
+&lt;li&gt;**多架构构建（ARM64 + AMD64）**已成 2024+ 标准&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;CRaC（Coordinated Restore at Checkpoint）&lt;/strong&gt;：&lt;strong&gt;JDK 17 / 21&lt;/strong&gt; 实验特性，&lt;strong&gt;JVM 启动 &amp;lt; 10ms&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;JLink 定制 JRE&lt;/strong&gt;：Spring Boot 3.x + JLink 50MB 级别镜像&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;实战建议（2025-2026 视角）&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;新项目&lt;/strong&gt; → &lt;strong&gt;JDK 21 LTS / 25 LTS + Eclipse Temurin 或 BellSoft Liberica&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Serverless / 冷启动&lt;/strong&gt; → &lt;strong&gt;GraalVM Native Image&lt;/strong&gt; 或 &lt;strong&gt;CRaC&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;金融 / 电信级延迟&lt;/strong&gt; → &lt;strong&gt;Azul Zulu Prime 21&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;AWS 环境&lt;/strong&gt; → &lt;strong&gt;Amazon Corretto 21&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;多架构&lt;/strong&gt; → &lt;strong&gt;docker buildx linux/amd64 + linux/arm64&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="下一步"&gt;下一步
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;想看 &lt;strong&gt;Nginx 自建镜像&lt;/strong&gt;（前端静态 / 反向代理 / WebSocket / TCP UDP）→ &lt;a class="link" href="#" &gt;Nginx 自建镜像实战&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;想看 &lt;strong&gt;Go 自建最小镜像&lt;/strong&gt;（scratch 5MB 级别）→ &lt;a class="link" href="#" &gt;Go 自建最小镜像&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;想看 &lt;strong&gt;Java 应用 Docker 化&lt;/strong&gt;（Tomcat / Spring Boot 打包 + HTTPS 证书）→ &lt;a class="link" href="#" &gt;Java 应用 Docker 化&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>

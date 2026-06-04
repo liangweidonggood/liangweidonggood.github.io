@@ -1,0 +1,444 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Arthas on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/arthas/</link><description>Recent content in Arthas on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Thu, 15 Nov 2018 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/arthas/index.xml" rel="self" type="application/rss+xml"/><item><title>Arthas 实战：Java 线上问题排查利器</title><link>https://liangweidonggood.github.io/p/arthas-online-diagnosis/</link><pubDate>Thu, 15 Nov 2018 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/arthas-online-diagnosis/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/arthas-online-diagnosis/image/cover.jpg" alt="Featured image of post Arthas 实战：Java 线上问题排查利器" /&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;为什么写这篇&lt;/strong&gt;：在生产环境里，复现一个偶发问题往往要等几天，重启服务会丢现场日志。Arthas 能在不重启、不改代码的前提下，把方法入参、返回值、异常、火焰图、线程栈全部&amp;quot;现场直播&amp;quot;——这是它与 jstack、jmap 最大的区别。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;适用读者&lt;/strong&gt;：需要在 K8s/容器中排查 Java 应用的运维与后端工程师。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;前置知识&lt;/strong&gt;：了解 JVM 基础（堆/线程）、Linux 常用命令、Docker/K8s 基础操作。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="目录"&gt;目录
+&lt;/h2&gt;&lt;ol&gt;
+&lt;li&gt;&lt;a class="link" href="#1-arthas-%e6%98%af%e4%bb%80%e4%b9%88" &gt;Arthas 是什么&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="#2-%e5%bf%ab%e9%80%9f%e5%bc%80%e5%a7%8b" &gt;快速开始&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="#3-%e6%a0%b8%e5%bf%83%e5%91%bd%e4%bb%a4%e9%80%9f%e6%9f%a5" &gt;核心命令速查&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="#4-%e5%85%b8%e5%9e%8b%e5%9c%ba%e6%99%af" &gt;典型场景&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="#5-%e5%b8%b8%e8%a7%81%e5%9d%91%e4%b8%8e%e6%9c%80%e4%bd%b3%e5%ae%9e%e8%b7%b5" &gt;常见坑与最佳实践&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;hr&gt;
+&lt;h2 id="1-arthas-是什么"&gt;1. Arthas 是什么
+&lt;/h2&gt;&lt;p&gt;Arthas 是 Alibaba 开源的 &lt;strong&gt;Java 线上诊断工具&lt;/strong&gt;，通过 Java Attach API 直接连进运行中的 JVM，&lt;strong&gt;不需要重启应用、不需要改代码&lt;/strong&gt;，即可获得：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;维度&lt;/th&gt;
+					&lt;th&gt;能看到什么&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;应用全景&lt;/td&gt;
+					&lt;td&gt;实时 dashboard（线程/内存/GC/Runtime）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;方法级观测&lt;/td&gt;
+					&lt;td&gt;入参、返回值、抛出异常、调用耗时&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;类加载&lt;/td&gt;
+					&lt;td&gt;反编译、查看类加载器、搜索类&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;性能&lt;/td&gt;
+					&lt;td&gt;profiler 火焰图、CPU 占用 TopN 线程&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;离线&lt;/td&gt;
+					&lt;td&gt;heap dump、线程快照&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;When to use&lt;/strong&gt;：当线上出现&amp;quot;日志看不出但能感知&amp;quot;的问题——比如接口慢但找不到慢在哪、内存偶发飙高、线程莫名 BLOCKED、第三方 jar 包方法名对不上——Arthas 是首选。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;hr&gt;
+&lt;h2 id="2-快速开始"&gt;2. 快速开始
+&lt;/h2&gt;&lt;h3 id="21-三种部署场景"&gt;2.1 三种部署场景
+&lt;/h3&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;场景&lt;/th&gt;
+					&lt;th&gt;命令骨架&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;直接跑&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;curl -O https://arthas.aliyun.com/arthas-boot.jar &amp;amp;&amp;amp; java -jar arthas-boot.jar&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;Docker 容器&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;docker cp arthas-boot.jar &amp;lt;container&amp;gt;:/ &amp;amp;&amp;amp; docker exec -it &amp;lt;container&amp;gt; bash&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;K8s Pod&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;kubectl cp arthas-boot.jar &amp;lt;ns&amp;gt;/&amp;lt;pod&amp;gt;:/ &amp;amp;&amp;amp; kubectl exec -it -n &amp;lt;ns&amp;gt; &amp;lt;pod&amp;gt; -- bash&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;Why docker/k8s 这种方式&lt;/strong&gt;：Arthas 启动后会 attach 到目标 JVM，要求&lt;strong&gt;两者在同一 PID 命名空间&lt;/strong&gt;。直接拷 jar 进容器是最稳的——不需要在镜像里预装，也不用在 Pod spec 加 sidecar。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;p&gt;启动后 arthas-boot 会扫描当前容器/进程里的 Java 进程，交互式让你选：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-text" data-lang="text"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;[INFO] Found existing java process, please choose one and input the serial number
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;* [1]: 12345 /jar/your-app.jar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;1
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;[INFO] Attach process 1 success.
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;输入序号回车，attach 成功后进入 &lt;code&gt;[arthas@1]&lt;/code&gt; 提示符。&lt;/p&gt;
+&lt;h3 id="22-k8s-中要先固定-hpa-副本"&gt;2.2 K8s 中要先固定 HPA 副本
+&lt;/h3&gt;&lt;p&gt;生产环境 HPA 滚动扩缩时 attach 目标 pod 可能正好被驱逐。&lt;strong&gt;临时把 minReplicas = maxReplicas&lt;/strong&gt; 锁住副本数：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 暂停 HPA（动态扩缩）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;kubectl patch hpa &amp;lt;deploy-name&amp;gt; -n &amp;lt;ns&amp;gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -p &lt;span class="s1"&gt;&amp;#39;{&amp;#34;spec&amp;#34;:{&amp;#34;minReplicas&amp;#34;:1, &amp;#34;maxReplicas&amp;#34;:1}}&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 排查完恢复&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;kubectl patch hpa &amp;lt;deploy-name&amp;gt; -n &amp;lt;ns&amp;gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -p &lt;span class="s1"&gt;&amp;#39;{&amp;#34;spec&amp;#34;:{&amp;#34;minReplicas&amp;#34;:1, &amp;#34;maxReplicas&amp;#34;:2}}&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="23-离线环境"&gt;2.3 离线环境
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;curl -Lo arthas.zip &lt;span class="s1"&gt;&amp;#39;https://arthas.aliyun.com/download/latest_version?mirror=aliyun&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;unzip arthas.zip -d arthas
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nb"&gt;cd&lt;/span&gt; arthas &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; java -jar arthas-boot.jar
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;hr&gt;
+&lt;h2 id="3-核心命令速查"&gt;3. 核心命令速查
+&lt;/h2&gt;&lt;p&gt;按&amp;quot;打开就用什么&amp;quot;的使用频次排序：&lt;/p&gt;
+&lt;h3 id="31-仪表盘类"&gt;3.1 仪表盘类
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;span class="lnt"&gt;9
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;dashboard &lt;span class="c1"&gt;# 整体面板，每秒刷新&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;dashboard -n &lt;span class="m"&gt;1&lt;/span&gt; &lt;span class="c1"&gt;# 只刷一次（脚本里更友好）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;thread &lt;span class="c1"&gt;# 所有线程，CPU 高者排前&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;thread -n &lt;span class="m"&gt;3&lt;/span&gt; &lt;span class="c1"&gt;# CPU Top3 线程&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;thread -b &lt;span class="c1"&gt;# 找出 synchronized 死锁的线程&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;thread &amp;lt;tid&amp;gt; &lt;span class="c1"&gt;# 单个线程的栈&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;jvm &lt;span class="c1"&gt;# JVM 信息（启动参数、class loader）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;memory &lt;span class="c1"&gt;# 堆/非堆分区域&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;heapdump /tmp/h.bin &lt;span class="c1"&gt;# 类比 jmap -dump&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="32-方法观测类字节码增强"&gt;3.2 方法观测类（字节码增强）
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;span class="lnt"&gt;18
+&lt;/span&gt;&lt;span class="lnt"&gt;19
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 监控方法，5 秒一次统计&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;monitor -c &lt;span class="m"&gt;5&lt;/span&gt; com.x.Service method
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 看入参+返回值&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;watch com.x.Service method &lt;span class="s1"&gt;&amp;#39;{params, returnObj}&amp;#39;&lt;/span&gt; -x &lt;span class="m"&gt;3&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 看异常&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;watch com.x.Service method &lt;span class="s1"&gt;&amp;#39;throwExp&amp;#39;&lt;/span&gt; -x &lt;span class="m"&gt;3&lt;/span&gt; --exception
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 调用耗时+路径&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;trace com.x.Service method
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 当前调用链&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;stack com.x.Service method
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 时间隧道：记录每次调用&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;tt -t com.x.Service method
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;tt -l &lt;span class="c1"&gt;# 列出所有记录&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;tt -i &lt;span class="m"&gt;1001&lt;/span&gt; -p &lt;span class="c1"&gt;# 重放某次调用&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;重要警告&lt;/strong&gt;：monitor/watch/trace 都通过&lt;strong&gt;字节码增强&lt;/strong&gt;实现，会在方法入口插入切面，&lt;strong&gt;对线上有性能开销&lt;/strong&gt;。用完务必 &lt;code&gt;stop&lt;/code&gt; 或 &lt;code&gt;reset&lt;/code&gt;，否则会一直生效。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="33-性能分析"&gt;3.3 性能分析
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;profiler start --event alloc &lt;span class="c1"&gt;# 采样分配&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;profiler status
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;profiler stop --file /tmp/p.html &lt;span class="c1"&gt;# 火焰图&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 拷出&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker cp &amp;lt;container&amp;gt;:/tmp/p.html .
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="34-反编译"&gt;3.4 反编译
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;jad com.x.Service method &lt;span class="c1"&gt;# 反编译方法&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sc com.x.* &lt;span class="c1"&gt;# search class&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sm com.x.* method &lt;span class="c1"&gt;# search method&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;hr&gt;
+&lt;h2 id="4-典型场景"&gt;4. 典型场景
+&lt;/h2&gt;&lt;h3 id="41-cpu-占用突然飙高"&gt;4.1 CPU 占用突然飙高
+&lt;/h3&gt;&lt;p&gt;三步走：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 1) 找出 Top3 忙线程&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;thread -n &lt;span class="m"&gt;3&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 2) 看那个线程在做什么&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;thread &amp;lt;tid&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 3) 顺藤摸瓜找方法&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;trace com.x.SomeService someHotMethod
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;或者更直接——&lt;strong&gt;火焰图&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;profiler start --duration &lt;span class="m"&gt;30&lt;/span&gt; --file /tmp/flame.svg --event cpu
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;30 秒采样后浏览器打开 flame.svg，&lt;strong&gt;横轴是 CPU 时间占比、纵轴是调用栈&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="42-偶发的慢请求"&gt;4.2 偶发的慢请求
+&lt;/h3&gt;&lt;p&gt;如果某个接口 1 小时才慢一次，普通日志抓不到。用 &lt;code&gt;tt&lt;/code&gt; 时空隧道：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;tt -t com.x.Controller slowApi
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;tt -l &lt;span class="c1"&gt;# 查所有记录&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;tt -i &lt;span class="m"&gt;1001&lt;/span&gt; &lt;span class="c1"&gt;# 看第 1001 次&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;tt -i &lt;span class="m"&gt;1001&lt;/span&gt; -p &lt;span class="c1"&gt;# 重放这次调用&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="43-看方法真实入参反编译后还原"&gt;4.3 看方法真实入参（反编译后还原）
+&lt;/h3&gt;&lt;p&gt;有时一个方法入参是 &lt;code&gt;ByteBuf&lt;/code&gt;（Netty 场景），日志里是 &lt;code&gt;toString()&lt;/code&gt; 的乱码。可以用 arthas 调 &lt;code&gt;ByteBufUtil.hexDump&lt;/code&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;// 原方法&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;channelRead&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ChannelHandlerContext&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Object&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;msg&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ByteBuf&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;buf&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ByteBuf&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;msg&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// ...&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;watch com.example.InboundHandler channelRead &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s1"&gt;&amp;#39;@io.netty.buffer.ByteBufUtil@hexDump(params[1])&amp;#39;&lt;/span&gt; -b
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;code&gt;-b&lt;/code&gt; 表示方法调用前触发，&lt;code&gt;-x 3&lt;/code&gt; 控制对象展开深度。十六进制打印出来后，&lt;strong&gt;再用协议表比对每个字节位&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="44-容器内-attach-失败"&gt;4.4 容器内 attach 失败
+&lt;/h3&gt;&lt;p&gt;最常见错误是 &lt;code&gt;Permission denied&lt;/code&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-text" data-lang="text"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;java.io.IOException: Permission denied
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; at sun.tools.attach.LinuxVirtualMachine.sendQuitTo(Native Method)
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;根因&lt;/strong&gt;：attach 走 &lt;code&gt;/proc/&amp;lt;pid&amp;gt;/root/tmp/.java_pid&amp;lt;uid&amp;gt;&lt;/code&gt;，需要 attach 进程与目标进程 UID 一致，且有 &lt;code&gt;/proc&lt;/code&gt; 写权限。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;解决方案&lt;/strong&gt;：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;场景&lt;/th&gt;
+					&lt;th&gt;方案&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;Docker&lt;/td&gt;
+					&lt;td&gt;启动时加 &lt;code&gt;--privileged&lt;/code&gt; 或 &lt;code&gt;--cap-add=SYS_PTRACE&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;K8s&lt;/td&gt;
+					&lt;td&gt;containerd 默认开启；containerd 旧版需 &lt;code&gt;securityContext.privileged: true&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;都不行&lt;/td&gt;
+					&lt;td&gt;重启容器是最后兜底（会丢现场）&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;hr&gt;
+&lt;h2 id="5-常见坑与最佳实践"&gt;5. 常见坑与最佳实践
+&lt;/h2&gt;&lt;h3 id="51-字节码增强未清理"&gt;5.1 字节码增强未清理
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;watch/trace/monitor&lt;/code&gt; 增强过的类，&lt;strong&gt;就算 arthas 客户端退出也不会自动 reset&lt;/strong&gt;。下次 attach 时这些类仍然是增强版，可能导致奇怪的&amp;quot;线上代码和我本地反编译的不一样&amp;quot;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;诊断&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 看哪些类被增强过&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;mc -M
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;清理&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;reset com.x.EnhancedClass &lt;span class="c1"&gt;# 恢复单个类&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;reset &lt;span class="c1"&gt;# 全部恢复&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="52-attach-完别忘了退出"&gt;5.2 attach 完别忘了退出
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;quit &lt;span class="c1"&gt;# 客户端断开，目标进程上的 arthas 服务继续运行&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;stop &lt;span class="c1"&gt;# 完全停止 arthas 服务&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;attach 后 arthas 实际是双进程——client（你 ssh 进去的这个）和 agent（在目标 JVM 里）。&lt;code&gt;quit&lt;/code&gt; 断 client，agent 还在；&lt;code&gt;stop&lt;/code&gt; 才彻底退出。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="53-profiler-不要长时间跑"&gt;5.3 profiler 不要长时间跑
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;profiler start&lt;/code&gt; 默认是无限期运行，&lt;strong&gt;会持续写采样数据&lt;/strong&gt;。30 秒到几分钟足够采样，&lt;strong&gt;用 &lt;code&gt;--duration 30&lt;/code&gt; 限定&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;profiler start --duration &lt;span class="m"&gt;30&lt;/span&gt; --file /tmp/p.html --event alloc
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="54-安全提示"&gt;5.4 安全提示
+&lt;/h3&gt;&lt;p&gt;Arthas 几乎能做&lt;strong&gt;任何运行时操作&lt;/strong&gt;（执行 OGNL、修改 logger 级别、强制 GC），&lt;strong&gt;绝不能暴露在公网&lt;/strong&gt;。如果是远程调试，用 &lt;code&gt;arthas tunnel&lt;/code&gt; + 鉴权，&lt;strong&gt;隧道地址必须是内网&lt;/strong&gt;。&lt;/p&gt;
+&lt;hr&gt;
+&lt;h2 id="小结"&gt;小结
+&lt;/h2&gt;&lt;p&gt;&lt;strong&gt;一句话总结&lt;/strong&gt;：Arthas 是一把 Java 线上诊断的瑞士军刀——dashboard 看全景，thread/trace 追热点，watch/tt 录证据，profiler 出火焰图，jad 看真相。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;5 个最常用命令&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-text" data-lang="text"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;dashboard # 全景
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;thread -n 3 # CPU Top3
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;trace 类名 方法 # 方法耗时
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;watch 类名 方法 &amp;#39;{params,returnObj}&amp;#39; # 入参返回值
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;profiler start --duration 30 --file flame.svg # 火焰图
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;5 个最容易踩的坑&lt;/strong&gt;：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;attach 容器报 &lt;code&gt;Permission denied&lt;/code&gt; → 加 &lt;code&gt;--cap-add SYS_PTRACE&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;K8s 排查前忘了锁 HPA 副本数 → 用 &lt;code&gt;kubectl patch hpa&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;watch/trace 用完没 reset → 类被污染，下次启动行为不一致&lt;/li&gt;
+&lt;li&gt;profiler 没加 &lt;code&gt;--duration&lt;/code&gt; 跑了一晚上 → 撑爆磁盘&lt;/li&gt;
+&lt;li&gt;Arthas 暴露在公网 → 任何人能执行 OGNL，等于拿到 RCE&lt;/li&gt;
+&lt;/ol&gt;
+&lt;hr&gt;
+&lt;p&gt;&lt;strong&gt;数据来源&lt;/strong&gt;：&lt;a class="link" href="https://arthas.aliyun.com/" target="_blank" rel="noopener"
+ &gt;Arthas 官方文档&lt;/a&gt;&lt;/p&gt;</description></item></channel></rss>

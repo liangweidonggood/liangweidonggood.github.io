@@ -1,0 +1,639 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Greenbone on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/greenbone/</link><description>Recent content in Greenbone on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Sat, 15 Apr 2023 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/greenbone/index.xml" rel="self" type="application/rss+xml"/><item><title>OpenVAS/GVM 漏洞扫描：从原生安装到 Docker 化部署</title><link>https://liangweidonggood.github.io/p/openvas-gvm-dong-tai/</link><pubDate>Sat, 15 Apr 2023 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/openvas-gvm-dong-tai/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/openvas-gvm-dong-tai/image/cover.jpg" alt="Featured image of post OpenVAS/GVM 漏洞扫描：从原生安装到 Docker 化部署" /&gt;&lt;h2 id="一为什么-2023-年要聊-openvas--gvm"&gt;一、为什么 2023 年要聊 OpenVAS / GVM
+&lt;/h2&gt;&lt;p&gt;&lt;strong&gt;OpenVAS&lt;/strong&gt;（Open Vulnerability Assessment Scanner）是开源界最老牌的网络漏洞扫描器之一，2017 年改名 &lt;strong&gt;GVM&lt;/strong&gt;（Greenbone Vulnerability Management），由 &lt;a class="link" href="https://www.greenbone.net/" target="_blank" rel="noopener"
+ &gt;Greenbone&lt;/a&gt; 维护。&lt;strong&gt;GVM 21.4+&lt;/strong&gt; 开始把组件名从 &lt;code&gt;openvas&lt;/code&gt; 改成 &lt;code&gt;gvm&lt;/code&gt;，但&lt;strong&gt;核心扫描引擎&lt;/strong&gt;还是 OpenVAS。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;2022-04 发布的 GVM 22.4&lt;/strong&gt; 是当前主流生产版本——本篇示例基于这个版本。&lt;code&gt;gvm-check-setup&lt;/code&gt; 跑出来的就是：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-text" data-lang="text"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;It seems like your GVM-23.11.0 installation is OK.
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;本文写于 2023-04-15&lt;/strong&gt;。示例基于 GVM 22.04（Ubuntu 22.04 LTS）+ 9 万+ NVT 漏洞库。Greenbone 在 2023-2024 年陆续把 &lt;code&gt;gvm-setup&lt;/code&gt; 改造成 &lt;code&gt;greenbone-feed-sync&lt;/code&gt;，新版本会越来越 Docker 化。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="二gvm-是什么能做什么"&gt;二、GVM 是什么、能做什么
+&lt;/h2&gt;&lt;p&gt;&lt;strong&gt;核心能力&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;漏洞扫描&lt;/strong&gt;：扫描目标主机的开放端口、运行服务、CVE 漏洞，&lt;strong&gt;9 万+ NVT&lt;/strong&gt;（Network Vulnerability Tests）覆盖&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;合规检查&lt;/strong&gt;：PCI DSS、HIPAA、CIS 等基线&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;CVE 库自动更新&lt;/strong&gt;：默认每天从 Greenbone 社区 feed 同步&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;典型使用场景&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;内部网络&lt;strong&gt;定期漏扫&lt;/strong&gt;（季度/半年）&lt;/li&gt;
+&lt;li&gt;重要业务上线前的&lt;strong&gt;安全验收&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;等保 2.0 二级 / 三级测评的&lt;strong&gt;漏洞证据&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;攻防演练 / 红蓝对抗的&lt;strong&gt;攻击面梳理&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;架构&lt;/strong&gt;（多个 daemon 协作）：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;组件&lt;/th&gt;
+					&lt;th&gt;作用&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;gvmd&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;主管理进程，API 服务&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;gsad&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;Web UI（Greenbone Security Assistant）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;openvas-scanner&lt;/code&gt; / &lt;code&gt;ospd-openvas&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;实际扫描引擎&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;pg-gvm&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;PostgreSQL 后端&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;redis-server&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;任务队列&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;notus-scanner&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;轻量存活/服务检测&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="三方式一apt-一键安装ubuntu-2204"&gt;三、方式一：apt 一键安装（Ubuntu 22.04）
+&lt;/h2&gt;&lt;h3 id="31-装-gvm-包"&gt;3.1 装 GVM 包
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo apt update
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo apt install gvm -y
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 依赖：greenbone-security-assistant gsad gvm-tools libmicrohttpd12t64&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="32-初始化"&gt;3.2 初始化
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo gvm-setup
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 初始化要下载漏洞库，时间 30-90 分钟（看带宽）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;初始化成功后会输出&lt;strong&gt;默认 admin 密码&lt;/strong&gt;（一串 UUID）：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-text" data-lang="text"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;[*] User created with password &amp;#39;3ffd4efb-d181-4201-ae4d-5126584f5461&amp;#39;.
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;一定要记下来&lt;/strong&gt;，或者立即改密：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo runuser -u _gvm -- gvmd --user&lt;span class="o"&gt;=&lt;/span&gt;admin --new-password&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="m"&gt;123456&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="33-检查"&gt;3.3 检查
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo gvm-check-setup
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;如果中途某一步失败，按提示执行修复命令。&lt;strong&gt;最常见的失败&lt;/strong&gt;是 &lt;code&gt;redis-server&lt;/code&gt; 没启动：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo systemctl &lt;span class="nb"&gt;enable&lt;/span&gt; --now redis-server@openvas.service
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="34-同步漏洞库"&gt;3.4 同步漏洞库
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo gvm-feed-update
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 较新的 GVM 版本会提示用：&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# sudo greenbone-feed-sync&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;code&gt;gvm-feed-update&lt;/code&gt; 已 deprecated，&lt;strong&gt;新版本 GVM（22.4+）推荐 &lt;code&gt;greenbone-feed-sync&lt;/code&gt;&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="35-启停"&gt;3.5 启停
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo gvm-start &lt;span class="c1"&gt;# 启动&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo gvm-stop &lt;span class="c1"&gt;# 停止&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;检查 GVM 服务状态：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;systemctl status ospd-openvas gvmd gsad
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;/blockquote&gt;
+&lt;h3 id="36-改-web-ui-监听地址"&gt;3.6 改 Web UI 监听地址
+&lt;/h3&gt;&lt;p&gt;默认只监听 &lt;code&gt;127.0.0.1:9392&lt;/code&gt;，&lt;strong&gt;远程访问需要改 0.0.0.0:443&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo systemctl edit gsad.service
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 写入：&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# [Service]&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# ExecStart=&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# ExecStart=/usr/local/sbin/gsad --foreground --listen=0.0.0.0 --port=443&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;或直接改 service 文件：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo vi /usr/lib/systemd/system/gsad.service
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# -ExecStart=/usr/local/sbin/gsad --foreground --listen=127.0.0.1 --port=9392&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# +ExecStart=/usr/local/sbin/gsad --foreground --listen=0.0.0.0 --port=443&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo systemctl daemon-reload
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo systemctl restart gsad
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="37-加新用户"&gt;3.7 加新用户
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo runuser -u _gvm -- gvmd --create-user&lt;span class="o"&gt;=&lt;/span&gt;&amp;lt;新用户名&amp;gt; --new-password&lt;span class="o"&gt;=&lt;/span&gt;&amp;lt;密码&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="38-日志"&gt;3.8 日志
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo tail -f /var/log/gvm/gvmd.log
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="四方式二docker-compose-集群化部署"&gt;四、方式二：docker-compose 集群化部署
+&lt;/h2&gt;&lt;p&gt;生产环境&lt;strong&gt;强烈推荐 Docker 部署&lt;/strong&gt;——方便升级、数据持久化、跟其他服务（反向代理、监控）集成。&lt;/p&gt;
+&lt;h3 id="41-拉取-yml-和镜像"&gt;4.1 拉取 yml 和镜像
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 拉 docker-compose.yml（22.4 官方）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;curl -f -L https://greenbone.github.io/docs/latest/_static/docker-compose-22.4.yml &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -o docker-compose.yml
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 拉镜像（约 3GB）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker-compose -f docker-compose.yml -p greenbone-community-edition pull
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;镜像清单（约 18 个容器）：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;镜像&lt;/th&gt;
+					&lt;th&gt;用途&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/scap-data&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;SCAP 数据&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/vulnerability-tests&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;NVT 漏洞测试&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/data-objects&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;数据对象&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/report-formats&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;报告格式&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/notus-data&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;notus 漏洞数据&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/cert-bund-data&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;CERT-Bund 漏洞&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/dfn-cert-data&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;DFN-CERT 漏洞&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/redis-server&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;任务队列&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/pg-gvm&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;PostgreSQL 后端&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/gvmd&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;主管理&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/gsa&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;Web UI&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/ospd-openvas&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;扫描引擎&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/openvas-scanner&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;扫描 daemon&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/gvm-tools&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;命令行工具&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;greenbone/gpg-data&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;GPG 签名&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3 id="42-启动"&gt;4.2 启动
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker-compose -f docker-compose.yml -p greenbone-community-edition up -d
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;第一次启动要等所有 feed 同步（5-30 分钟），看日志：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker-compose -f docker-compose.yml -p greenbone-community-edition logs -f
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="43-web-ui-访问"&gt;4.3 Web UI 访问
+&lt;/h3&gt;&lt;p&gt;默认 &lt;code&gt;https://localhost:9392&lt;/code&gt;（docker-compose yml 里绑定了 &lt;code&gt;127.0.0.1:9392:80&lt;/code&gt;）。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;默认 admin 密码：&lt;code&gt;admin&lt;/code&gt;&lt;/strong&gt;——&lt;strong&gt;第一次登录必须立即改密&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker-compose -f docker-compose.yml -p greenbone-community-edition &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nb"&gt;exec&lt;/span&gt; -u gvmd gvmd gvmd --user&lt;span class="o"&gt;=&lt;/span&gt;admin --new-password&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="m"&gt;123456&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="44-改远程访问"&gt;4.4 改远程访问
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;docker-compose.yml&lt;/code&gt; 里：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-yaml" data-lang="yaml"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;services&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;gsa&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;ports&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;- &lt;span class="m"&gt;9392&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;80&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;# 改成 0.0.0.0:9392:80&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;# 或者&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;- &lt;span class="m"&gt;443&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;80&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;# 标准 HTTPS 端口&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;坑提醒&lt;/strong&gt;：把 9392 直接暴露到公网&lt;strong&gt;极不安全&lt;/strong&gt;——GVM 有 RCE 历史漏洞。&lt;strong&gt;必须&lt;/strong&gt;走 Nginx 反代 + Basic Auth + IP 白名单。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="45-删除环境危险操作"&gt;4.5 删除环境（危险操作）
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker-compose -f docker-compose.yml -p greenbone-community-edition down -v
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# -v 会删所有 volume，漏洞库、扫描结果、用户数据全清&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="五gvm-check-setup-详解"&gt;五、gvm-check-setup 详解
+&lt;/h2&gt;&lt;p&gt;跑完 &lt;code&gt;gvm-setup&lt;/code&gt; / docker 启动后，建议跑一次：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo gvm-check-setup
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;典型输出（成功）：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-text" data-lang="text"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;gvm-check-setup 23.11.0
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; Test completeness and readiness of GVM-23.11.0
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;Step 1: Checking OpenVAS (Scanner)...
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: OpenVAS Scanner is present in version 23.0.1.
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: Notus Scanner is present in version 22.6.3.
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: Server CA Certificate is present as /var/lib/gvm/CA/servercert.pem.
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: _gvm owns all files in /var/lib/openvas/gnupg
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: redis-server is present.
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: scanner (db_address setting) is configured properly using the redis-server socket
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: the mqtt_server_uri is defined in /etc/openvas/openvas.conf
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: _gvm owns all files in /var/lib/openvas/plugins
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: NVT collection in /var/lib/openvas/plugins contains 91760 NVTs.
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: The notus directory /var/lib/notus/products contains 464 NVTs.
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;Step 2: Checking GVMD Manager ...
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; OK: GVM Manager (gvmd) is present in version 23.5.2.
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;...
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;It seems like your GVM-23.11.0 installation is OK.
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;NVT 数量&lt;/strong&gt;是核心指标——&lt;strong&gt;9 万+&lt;/strong&gt; 才算健康，低于 5 万说明漏洞库同步失败。&lt;/p&gt;
+&lt;h2 id="六典型任务扫描一个网段"&gt;六、典型任务：扫描一个网段
+&lt;/h2&gt;&lt;p&gt;登录 Web UI 后：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;Configuration → Targets&lt;/strong&gt; → New Target
+&lt;ul&gt;
+&lt;li&gt;Name: &lt;code&gt;内网服务器网段&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;Hosts: &lt;code&gt;192.168.1.0/24&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;Port List: &lt;code&gt;All IANA Assigned TCP and UDP&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;Alive Test: &lt;code&gt;Consider Alive&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Configuration → Scan Configs&lt;/strong&gt; → 选一个基线
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;Full and fast&lt;/code&gt;：常用&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;Base&lt;/code&gt;：快，弱扫&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Scans → Tasks&lt;/strong&gt; → New Task
+&lt;ul&gt;
+&lt;li&gt;Name: &lt;code&gt;季度漏扫-2023Q2&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;Target: &lt;code&gt;内网服务器网段&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;Scanner: &lt;code&gt;OpenVAS Default&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;Scan Config: &lt;code&gt;Full and fast&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Save → Start&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;扫描结果：Dashboard / Reports&lt;/li&gt;
+&lt;/ol&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;坑提醒&lt;/strong&gt;：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;第一次跑&lt;strong&gt;完整扫描很慢&lt;/strong&gt;（24-48 小时，9 万 NVT × 254 个 IP）&lt;/li&gt;
+&lt;li&gt;大规模扫描&lt;strong&gt;分批&lt;/strong&gt;做，避免被目标网络的 IDS/IPS 拉黑&lt;/li&gt;
+&lt;li&gt;重要业务&lt;strong&gt;先打招呼再扫&lt;/strong&gt;——避免触发告警 / 业务中断&lt;/li&gt;
+&lt;/ol&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="七生产环境建议"&gt;七、生产环境建议
+&lt;/h2&gt;&lt;h3 id="71-走-nginx-反代"&gt;7.1 走 Nginx 反代
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;span class="lnt"&gt;18
+&lt;/span&gt;&lt;span class="lnt"&gt;19
+&lt;/span&gt;&lt;span class="lnt"&gt;20
+&lt;/span&gt;&lt;span class="lnt"&gt;21
+&lt;/span&gt;&lt;span class="lnt"&gt;22
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-nginx" data-lang="nginx"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;server&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;listen&lt;/span&gt; &lt;span class="mi"&gt;443&lt;/span&gt; &lt;span class="s"&gt;ssl&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;server_name&lt;/span&gt; &lt;span class="s"&gt;gvm.example.com&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;ssl_certificate&lt;/span&gt; &lt;span class="s"&gt;/etc/letsencrypt/live/gvm.example.com/fullchain.pem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;ssl_certificate_key&lt;/span&gt; &lt;span class="s"&gt;/etc/letsencrypt/live/gvm.example.com/privkey.pem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="c1"&gt;# Basic Auth 二层密码
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;auth_basic&lt;/span&gt; &lt;span class="s"&gt;&amp;#34;GVM&lt;/span&gt; &lt;span class="s"&gt;Admin&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;auth_basic_user_file&lt;/span&gt; &lt;span class="s"&gt;/etc/nginx/.htpasswd&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="c1"&gt;# IP 白名单
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;allow&lt;/span&gt; &lt;span class="n"&gt;10.0.0.0&lt;/span&gt;&lt;span class="s"&gt;/8&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;allow&lt;/span&gt; &lt;span class="n"&gt;192.168.0.0&lt;/span&gt;&lt;span class="s"&gt;/16&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;deny&lt;/span&gt; &lt;span class="s"&gt;all&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;location&lt;/span&gt; &lt;span class="s"&gt;/&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;proxy_pass&lt;/span&gt; &lt;span class="s"&gt;http://127.0.0.1:9392&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;proxy_set_header&lt;/span&gt; &lt;span class="s"&gt;Host&lt;/span&gt; &lt;span class="nv"&gt;$host&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;proxy_set_header&lt;/span&gt; &lt;span class="s"&gt;X-Real-IP&lt;/span&gt; &lt;span class="nv"&gt;$remote_addr&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="72-走-ldapad-集成"&gt;7.2 走 LDAP/AD 集成
+&lt;/h3&gt;&lt;p&gt;GVM 支持 LDAP 认证（22.4+），企业内网可对接 AD。&lt;/p&gt;
+&lt;h3 id="73-漏洞库同步策略"&gt;7.3 漏洞库同步策略
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 每天凌晨同步&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;crontab -e
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;3&lt;/span&gt; * * * /usr/bin/greenbone-feed-sync
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="74-备份"&gt;7.4 备份
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;apt 方式：备份 &lt;code&gt;/var/lib/gvm/&lt;/code&gt; &lt;code&gt;/var/lib/openvas/&lt;/code&gt; &lt;code&gt;/etc/gvm/&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;docker 方式：备份所有命名 volume（&lt;code&gt;docker volume ls&lt;/code&gt;）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="八典型坑速查"&gt;八、典型坑速查
+&lt;/h2&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;现象&lt;/th&gt;
+					&lt;th&gt;原因&lt;/th&gt;
+					&lt;th&gt;处理&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;gvm-check-setup&lt;/code&gt; Step 1 失败 NVT 数量 &amp;lt; 5 万&lt;/td&gt;
+					&lt;td&gt;漏洞库没同步完&lt;/td&gt;
+					&lt;td&gt;重跑 &lt;code&gt;greenbone-feed-sync&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;9392 端口访问不到&lt;/td&gt;
+					&lt;td&gt;默认只监听 127.0.0.1&lt;/td&gt;
+					&lt;td&gt;改 &lt;code&gt;gsad.service&lt;/code&gt; 监听 0.0.0.0&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;扫描任务卡在 &amp;ldquo;Requested&amp;rdquo;&lt;/td&gt;
+					&lt;td&gt;扫描引擎没启动&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;systemctl start ospd-openvas&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;忘记 admin 默认密码&lt;/td&gt;
+					&lt;td&gt;UUID 在 &lt;code&gt;gvm-setup&lt;/code&gt; 输出里&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;runuser -u _gvm -- gvmd --user=admin --new-password=...&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;扫描器报 &amp;ldquo;Host not alive&amp;rdquo;&lt;/td&gt;
+					&lt;td&gt;目标屏蔽 ICMP&lt;/td&gt;
+					&lt;td&gt;关掉 Alive Test 或改用 TCP ping&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;漏洞库同步巨慢&lt;/td&gt;
+					&lt;td&gt;没配代理&lt;/td&gt;
+					&lt;td&gt;配 &lt;code&gt;greenbone-feed-sync&lt;/code&gt; 走 &lt;code&gt;HTTPS_PROXY&lt;/code&gt; 环境变量&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="九2024-视角补充"&gt;九、2024+ 视角补充
+&lt;/h2&gt;&lt;p&gt;本文写于 2023-04，2024-2026 期间 GVM / OpenVAS 关键演进：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;GVM 23.x / 24.x&lt;/strong&gt;（2024-2025）：&lt;strong&gt;notus-scanner 重写&lt;/strong&gt;（Rust 重写后性能 5x）；&lt;strong&gt;ospd-openvas 升级&lt;/strong&gt;；&lt;strong&gt;GSA Web UI 全面重构&lt;/strong&gt;（React 18 + TypeScript）；&lt;strong&gt;PG 后端&lt;/strong&gt; PostgreSQL 15+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Greenbone Community Edition (GCE) 23.04+&lt;/strong&gt;：&lt;strong&gt;每月发版&lt;/strong&gt;（vs 老版本 季度发版）；&lt;strong&gt;greenbone-feed-sync&lt;/strong&gt; 替代老的 gvm-feed-update（已 2024 全面 EOL）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Greenbone Enterprise Appliance (GEA)&lt;/strong&gt;：商业版 2024 强化 &lt;strong&gt;SaaS 化部署&lt;/strong&gt;（cloud.greenbone.net），&lt;strong&gt;不再需要本地硬件&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;NVT 漏洞库 2024-2026&lt;/strong&gt;：&lt;strong&gt;9 万+ → 11 万+ NVT&lt;/strong&gt;（漏洞库持续增长）；&lt;strong&gt;每天同步&lt;/strong&gt; Greenbone Community Feed&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;漏洞扫描生态&lt;/strong&gt;（2024+ 视角）：
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Nuclei 3.x&lt;/strong&gt;（2024-2026）：&lt;strong&gt;ProjectDiscovery 出品&lt;/strong&gt;——&lt;strong&gt;YAML 模板&lt;/strong&gt;定义扫描，&lt;strong&gt;社区模板市场&lt;/strong&gt;（5000+ 模板），&lt;strong&gt;云原生漏洞扫描首选&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Trivy 0.50+&lt;/strong&gt;（2024-2025）：&lt;strong&gt;容器 / IaC / 镜像 / 文件系统&lt;/strong&gt; 一站式扫描，&lt;strong&gt;K8s 集成&lt;/strong&gt;完善&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Snyk / Aikido&lt;/strong&gt;（2024）：&lt;strong&gt;AI 辅助漏洞评估&lt;/strong&gt;（判断是否真影响项目）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Tenable Nessus 10.7+&lt;/strong&gt;（2025）：&lt;strong&gt;AI 漏洞优先级排序&lt;/strong&gt;；&lt;strong&gt;云 connector&lt;/strong&gt;（AWS / Azure / GCP）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Qualys VMDR 4.x&lt;/strong&gt;（2024）：&lt;strong&gt;云原生扫描&lt;/strong&gt;；&lt;strong&gt;资产清单 / 风险评分&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;AI 驱动的漏洞扫描&lt;/strong&gt;（2024+ 趋势）：用 LLM 做&lt;strong&gt;漏洞优先级排序&lt;/strong&gt;（&amp;ldquo;哪些漏洞该先修&amp;rdquo;）——传统按 CVSS 排不科学，AI 结合&lt;strong&gt;业务上下文&lt;/strong&gt;判断更准&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;合规基线&lt;/strong&gt;（2024+ 视角）：&lt;strong&gt;CIS Benchmarks v8.0&lt;/strong&gt;、&lt;strong&gt;NIST 800-53 Rev 5&lt;/strong&gt;、&lt;strong&gt;等保 2.0 三级&lt;/strong&gt;——GVM 内置基线持续更新&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;实战建议（2025-2026 视角）&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;传统漏洞扫描&lt;/strong&gt; → &lt;strong&gt;GVM 24.x Community Edition&lt;/strong&gt;（仍是开源首选）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;容器 / 云原生&lt;/strong&gt; → &lt;strong&gt;Trivy + Nuclei&lt;/strong&gt; 黄金组合&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;企业 / 合规&lt;/strong&gt; → &lt;strong&gt;Tenable Nessus Pro / Qualys VMDR&lt;/strong&gt;（商业付费）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;AI 辅助&lt;/strong&gt; → &lt;strong&gt;Snyk / Aikido&lt;/strong&gt;（2024+ 趋势，&lt;strong&gt;AI 优先级排序&lt;/strong&gt;）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;免费 / 个人&lt;/strong&gt; → &lt;strong&gt;Trivy + Nuclei&lt;/strong&gt;（开源 + 模板市场）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="十下一步"&gt;十、下一步
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;想要更现代化的漏洞管理 → 上 &lt;strong&gt;Greenbone Enterprise&lt;/strong&gt;（商业版）/ &lt;strong&gt;Tenable Nessus&lt;/strong&gt;（闭源老大）/ &lt;strong&gt;Qualys VMDR&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;想做基线合规扫描 → GVM 内置 CIS / PCI DSS Level 1 基线&lt;/li&gt;
+&lt;li&gt;想做大规模分布式扫描 → Greenbone Enterprise Appliance 多节点集群&lt;/li&gt;
+&lt;li&gt;想做自定义漏洞检测 → 写 NASL（NVT 脚本语言）&lt;/li&gt;
+&lt;li&gt;想要容器 / 云原生漏洞扫描 → &lt;strong&gt;Trivy + Nuclei&lt;/strong&gt; 黄金组合&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="参考资料"&gt;参考资料
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;a class="link" href="https://greenbone.github.io/docs/latest/" target="_blank" rel="noopener"
+ &gt;Greenbone Community Containers 文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/greenbone/gvm" target="_blank" rel="noopener"
+ &gt;GVM 22.4 Source 仓库&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://greenbone.github.io/docs/" target="_blank" rel="noopener"
+ &gt;GVM 官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/greenbone/openvas-scanner" target="_blank" rel="noopener"
+ &gt;OpenVAS NVT 库&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://cve.mitre.org/" target="_blank" rel="noopener"
+ &gt;CVE 库&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.tenable.com/blog/nessus-vs-openvas" target="_blank" rel="noopener"
+ &gt;Nessus vs OpenVAS 对比&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://greenbone.github.io/docs/latest/release-notes/" target="_blank" rel="noopener"
+ &gt;GVM 23.x / 24.x 升级指南&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/aquasecurity/trivy" target="_blank" rel="noopener"
+ &gt;Trivy 容器漏洞扫描&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.tenable.com/products/nessus" target="_blank" rel="noopener"
+ &gt;Tenable Nessus 10.x&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>

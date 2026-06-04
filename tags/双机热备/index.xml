@@ -1,0 +1,445 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>双机热备 on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/%E5%8F%8C%E6%9C%BA%E7%83%AD%E5%A4%87/</link><description>Recent content in 双机热备 on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Mon, 15 Dec 2014 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/%E5%8F%8C%E6%9C%BA%E7%83%AD%E5%A4%87/index.xml" rel="self" type="application/rss+xml"/><item><title>Nginx + Keepalived 双机热备与 VRRP 原理</title><link>https://liangweidonggood.github.io/p/nginx-keepalived-shuangji-rebei/</link><pubDate>Mon, 15 Dec 2014 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/nginx-keepalived-shuangji-rebei/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/nginx-keepalived-shuangji-rebei/image/cover.jpg" alt="Featured image of post Nginx + Keepalived 双机热备与 VRRP 原理" /&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;本文写于 2014 年 12 月&lt;/strong&gt;——彼时 Nginx 反代 + Keepalived 是中小公司做&amp;quot;高可用&amp;quot;的标配，比上硬件 F5 便宜，比 DNS 切换快。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="一为什么需要双机热备"&gt;一、为什么需要双机热备
+&lt;/h2&gt;&lt;p&gt;单点 Nginx 一旦宕机，整个网站瞬间 503。在没有云 SLB 的年代，IDC 机房做&amp;quot;对外服务的入口高可用&amp;quot;几乎只有两条路：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;硬件 F5 / A10 负载均衡&lt;/strong&gt;：贵，动辄几十万&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;软件 VRRP 协议 + 两台 Nginx&lt;/strong&gt;：Nginx 本身免费，Keepalived 同样免费&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;Nginx + Keepalived 方案的核心是&lt;strong&gt;虚拟 IP（VIP）漂移&lt;/strong&gt;：两台机器共享一个 VIP，正常情况下 VIP 在主节点，一旦主节点 Nginx 挂了，VIP 自动漂到备节点，对外几乎无感。&lt;/p&gt;
+&lt;h2 id="二keepalived-工作原理"&gt;二、Keepalived 工作原理
+&lt;/h2&gt;&lt;p&gt;Keepalived 是基于 &lt;strong&gt;VRRP（Virtual Router Redundancy Protocol，虚拟路由冗余协议）&lt;/strong&gt; 实现的高可用服务软件，主要功能是&lt;strong&gt;真机故障隔离 + 负载均衡器间失败切换&lt;/strong&gt;，防止单点故障。&lt;/p&gt;
+&lt;p&gt;VRRP 协议保证：当主机的下一跳路由器出现故障时，由另一台路由器代替故障路由器工作，从而保持网络通信的连续性和可靠性。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;关键点&lt;/strong&gt;：VRRP 虚拟出来的是&amp;quot;路由&amp;quot;——本质是一组路由器（物理机）共享一个虚拟 IP，对外只暴露 VIP，内部选举谁持有 VIP。&lt;/p&gt;
+&lt;h2 id="三nginx--keepalived-双机热备部署"&gt;三、Nginx + Keepalived 双机热备部署
+&lt;/h2&gt;&lt;h3 id="31-拓扑结构"&gt;3.1 拓扑结构
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-fallback" data-lang="fallback"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; ┌──────────────┐
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; │ VIP │ &amp;lt;- 对外服务的虚拟 IP（如 192.168.6.100）
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; │ 192.168.6.100│
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; └──────┬───────┘
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; │ VRRP 心跳
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; ┌───────┴───────┐
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; │ │
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;┌──────┴──────┐ ┌─────┴───────┐
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ Master │ │ Backup │
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ 192.168.6.29│ │192.168.6.30 │
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ Nginx+Keep │ │ Nginx+Keep │
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;└─────────────┘ └─────────────┘
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="32-安装-keepalived"&gt;3.2 安装 Keepalived
+&lt;/h3&gt;&lt;p&gt;两台机器都装：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;yum install keepalived -y
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="33-配置-keepalivedconf"&gt;3.3 配置 keepalived.conf
+&lt;/h3&gt;&lt;p&gt;主节点（&lt;code&gt;/etc/keepalived/keepalived.conf&lt;/code&gt;）：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;span class="lnt"&gt;18
+&lt;/span&gt;&lt;span class="lnt"&gt;19
+&lt;/span&gt;&lt;span class="lnt"&gt;20
+&lt;/span&gt;&lt;span class="lnt"&gt;21
+&lt;/span&gt;&lt;span class="lnt"&gt;22
+&lt;/span&gt;&lt;span class="lnt"&gt;23
+&lt;/span&gt;&lt;span class="lnt"&gt;24
+&lt;/span&gt;&lt;span class="lnt"&gt;25
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-nginx" data-lang="nginx"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;vrrp_script&lt;/span&gt; &lt;span class="s"&gt;check_nginx&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;script&lt;/span&gt; &lt;span class="s"&gt;&amp;#34;/usr/local/src/check_nginx.sh&amp;#34;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;interval&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt; &lt;span class="c1"&gt;# 每 2 秒检查一次
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;weight&lt;/span&gt; &lt;span class="s"&gt;-20&lt;/span&gt; &lt;span class="c1"&gt;# 失败时优先级减 20
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;fall&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt; &lt;span class="c1"&gt;# 连续 3 次失败才认为真挂了
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;rise&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt; &lt;span class="c1"&gt;# 连续 2 次成功才认为恢复
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="err"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="s"&gt;vrrp_instance&lt;/span&gt; &lt;span class="s"&gt;VI_1&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;state&lt;/span&gt; &lt;span class="s"&gt;MASTER&lt;/span&gt; &lt;span class="c1"&gt;# 本机初始状态
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;interface&lt;/span&gt; &lt;span class="s"&gt;eth0&lt;/span&gt; &lt;span class="c1"&gt;# 绑定的网卡
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;virtual_router_id&lt;/span&gt; &lt;span class="mi"&gt;51&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;priority&lt;/span&gt; &lt;span class="mi"&gt;100&lt;/span&gt; &lt;span class="c1"&gt;# 主节点优先级（备节点配 90）
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;advert_int&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt; &lt;span class="c1"&gt;# VRRP 通告间隔（秒）
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;authentication&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;auth_type&lt;/span&gt; &lt;span class="s"&gt;PASS&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;auth_pass&lt;/span&gt; &lt;span class="mi"&gt;1111&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="err"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;virtual_ipaddress&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;192.168.6.100/24&lt;/span&gt; &lt;span class="c1"&gt;# VIP
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="err"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s"&gt;track_script&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="kn"&gt;check_nginx&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="err"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="err"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;备节点唯一区别：&lt;code&gt;state BACKUP&lt;/code&gt; + &lt;code&gt;priority 90&lt;/code&gt;。&lt;/p&gt;
+&lt;h3 id="34-健康检查脚本"&gt;3.4 健康检查脚本
+&lt;/h3&gt;&lt;p&gt;Keepalived 不仅能检查自己心跳，更强大的是&lt;strong&gt;通过脚本检查 Nginx 是否活着&lt;/strong&gt;——&lt;code&gt;/usr/local/src/check_nginx.sh&lt;/code&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="cp"&gt;#!/bin/bash
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# Nginx 健康检查：HTTP 200 才算健康&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nv"&gt;A&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="sb"&gt;`&lt;/span&gt;ps -C nginx --no-header &lt;span class="p"&gt;|&lt;/span&gt; wc -l&lt;span class="sb"&gt;`&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="nv"&gt;$A&lt;/span&gt; -eq &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="k"&gt;then&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="c1"&gt;# Nginx 挂了，尝试拉起&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; /usr/local/nginx/sbin/nginx
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; sleep &lt;span class="m"&gt;2&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="sb"&gt;`&lt;/span&gt;ps -C nginx --no-header &lt;span class="p"&gt;|&lt;/span&gt; wc -l&lt;span class="sb"&gt;`&lt;/span&gt; -eq &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="k"&gt;then&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="c1"&gt;# 拉起失败，关闭 Keepalived，让 VIP 漂到备机&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; killall keepalived
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="k"&gt;fi&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;fi&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;加执行权限：&lt;code&gt;chmod +x /usr/local/src/check_nginx.sh&lt;/code&gt;。&lt;/p&gt;
+&lt;h3 id="35-启动"&gt;3.5 启动
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;nginx &lt;span class="c1"&gt;# 先启动 Nginx&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;systemctl start keepalived &lt;span class="c1"&gt;# 再启动 Keepalived&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;查看 VIP 是否在主节点：&lt;code&gt;ip addr show eth0&lt;/code&gt;，应能看到 &lt;code&gt;inet 192.168.6.100/24&lt;/code&gt; 出现在主节点。&lt;/p&gt;
+&lt;h2 id="四模拟故障测试"&gt;四、模拟故障测试
+&lt;/h2&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 1. 在主节点停掉 Nginx&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;nginx -s stop
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 2. 检查脚本会拉起 Nginx（如果起不来，则杀掉 Keepalived）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 3. 观察 VIP 漂移到备节点&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ip addr show eth0
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 备节点上应出现 192.168.6.100&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="五vrrp-选举细节"&gt;五、VRRP 选举细节
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;优先级（priority）&lt;/strong&gt;：数值越大越优先成为 Master，Master 范围 1-254（0 和 255 有特殊用途）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;不抢占模式（nopreempt）&lt;/strong&gt;：默认是抢占的（备机升级为主机后，原主机恢复会再抢回 VIP），但实际生产中&lt;strong&gt;建议配不抢占&lt;/strong&gt;——避免抖动&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;认证（authentication）&lt;/strong&gt;：PASS 认证要求主备密码一致，否则收不到通告&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;virtual_router_id&lt;/strong&gt;：同一 VRRP 实例内必须相同，不同实例必须不同&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="六nginx--keepalived-的局限"&gt;六、Nginx + Keepalived 的局限
+&lt;/h2&gt;&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;VIP 漂移有秒级延迟&lt;/strong&gt;：默认 &lt;code&gt;advert_int 1&lt;/code&gt; + 脚本 &lt;code&gt;interval 2&lt;/code&gt; + &lt;code&gt;fall 3&lt;/code&gt;，最坏 5-6 秒才完成漂移&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;脑裂问题&lt;/strong&gt;：主备之间心跳断了但都还活着，会出现两个 VIP 抢同一资源——&lt;strong&gt;解法&lt;/strong&gt;：① 双心跳线（串口线 + 网线）；② 监控脚本探测对端&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;单点配置不统一&lt;/strong&gt;：两台机器的 Nginx 配置必须同步——&lt;strong&gt;解法&lt;/strong&gt;：用 rsync + inotify 自动同步，或上配置中心（Nacos/Consul）&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="七后续演进"&gt;七、后续演进
+&lt;/h2&gt;&lt;p&gt;随着云时代到来，这套方案在 2017 年后逐渐被替代：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;云厂商 SLB&lt;/strong&gt;（阿里云 SLB / AWS ELB）：开箱即用，自带高可用&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;LVS + Keepalived&lt;/strong&gt;：Nginx 退到 7 层，LVS 在 4 层做入口，更稳&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Nginx + UPScript + Consul&lt;/strong&gt;：服务发现 + 健康检查 + 动态 upstream，比静态 VIP 更灵活&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;但&lt;strong&gt;理解 VRRP 原理是面试高频题&lt;/strong&gt;——它不仅能解释 Keepalived，也能解释 LVS、HAProxy、Cisco HSRP、华为 VRRP，本质都是同一个协议家族。&lt;/p&gt;
+&lt;h2 id="八面试常问"&gt;八、面试常问
+&lt;/h2&gt;&lt;p&gt;&lt;strong&gt;Q：Keepalived 和 Heartbeat 有什么区别？&lt;/strong&gt;
+A：都是高可用集群管理软件，但 Keepalived 基于 VRRP 协议工作在网络层，主要做 IP 漂移；Heartbeat 更老，做资源接管和消息心跳。&lt;strong&gt;Keepalived 配置简单 + 自带健康检查脚本&lt;/strong&gt;，是现在的事实标准。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Q：脑裂怎么解？&lt;/strong&gt;
+A：三招——① 双心跳线（网线 + 串口）物理防脑裂；② 监控脚本（监控对端 VIP 是否存在）；③ 业务层幂等设计兜底（即使双写也保证最终一致）。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Q：Nginx + Keepalived 和 LVS + Keepalived 怎么选？&lt;/strong&gt;
+A：LVS 工作在 4 层（传输层），性能更高（百万级并发），但配置复杂；Nginx 工作在 7 层（应用层），可以做按 URL / Header 灰度，但性能低一档（10 万级并发）。&lt;strong&gt;实际生产两者经常配合&lt;/strong&gt;：LVS 做入口 → Nginx 7 层分流 → 后端应用。&lt;/p&gt;
+&lt;h2 id="九小结"&gt;九、小结
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;核心思想&lt;/strong&gt;：VRRP 协议 + 共享 VIP + 健康检查 + 自动漂移&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;部署关键&lt;/strong&gt;：两台机器 + 同样 Nginx 配置 + 同样 Keepalived 配置（priority 不同）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;健康检查脚本&lt;/strong&gt;：让 Keepalived 不只检查自己，更检查 Nginx 进程&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;演进方向&lt;/strong&gt;：云 SLB / LVS 4 层 / Consul 服务发现&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="十2024-视角10-年后回望vrrp-仍不过时"&gt;十、2024+ 视角：10 年后回望，VRRP 仍不过时
+&lt;/h2&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;本文写于 2014 年 12 月。&lt;strong&gt;10 年后的 2024-2026，Nginx + Keepalived 这套方案依然没死&lt;/strong&gt;——只是从&amp;quot;主力&amp;quot;变成&amp;quot;基础设施&amp;quot;。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="101-keepalived-10-年未变协议层的长寿"&gt;10.1 Keepalived 10 年未变：协议层的&amp;quot;长寿&amp;quot;
+&lt;/h3&gt;&lt;p&gt;2014 年的 Keepalived 配置和 2024 年的 Keepalived 配置&lt;strong&gt;核心语法几乎一样&lt;/strong&gt;——这是协议层（VRRP RFC 5798）稳定的胜利。&lt;/p&gt;
+&lt;p&gt;2024-2026 行业里 Keepalived 仍在用的场景：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;传统行业（银行 / 政企 / 制造）&lt;/strong&gt;—— 上 K8s 太重，传统 IDC 还在用 Keepalived&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;私有云 / 混合云&lt;/strong&gt;—— 自建机房 + 公有云的混合架构，&lt;strong&gt;Keepalived 比云 SLB 更灵活&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;数据库双主 / 主备&lt;/strong&gt;—— MySQL / PostgreSQL 高可用方案里 Keepalived 仍是标配&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;国产化替代&lt;/strong&gt;—— 信创场景（国产化软硬件替代）里，&lt;strong&gt;Keepalived 是少数没被卡脖子的 HA 方案&lt;/strong&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;关键认知&lt;/strong&gt;：VRRP 协议&amp;quot;够简单、够稳定&amp;quot;是 10 年长寿的根本——AI 时代到来时，&lt;strong&gt;最朴素的技术反而最难被淘汰&lt;/strong&gt;。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="102-云原生时代的-ha-演进"&gt;10.2 云原生时代的 HA 演进
+&lt;/h3&gt;&lt;p&gt;2014 年我们用 Keepalived 做&amp;quot;主备 + VIP 漂移&amp;quot;。&lt;strong&gt;2024-2026 主流 HA 方案&lt;/strong&gt;：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;场景&lt;/th&gt;
+					&lt;th&gt;2014 主流&lt;/th&gt;
+					&lt;th&gt;2024+ 主流&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;公有云入口&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;Nginx + Keepalived&lt;/td&gt;
+					&lt;td&gt;阿里云 SLB / AWS ALB / Cloudflare&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;私有云入口&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;Nginx + Keepalived&lt;/td&gt;
+					&lt;td&gt;Nginx Ingress + K8s Service&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;数据库高可用&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;MySQL + Keepalived + VIP&lt;/td&gt;
+					&lt;td&gt;MHA / Orchestrator / Patroni / Galera&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;Redis 高可用&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;Redis Sentinel + Keepalived&lt;/td&gt;
+					&lt;td&gt;Redis Sentinel + Cluster + K8s Operator&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;消息队列 HA&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;RabbitMQ + Keepalived&lt;/td&gt;
+					&lt;td&gt;RabbitMQ Cluster + K8s Operator&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;全局负载&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;DNS 轮询 + F5&lt;/td&gt;
+					&lt;td&gt;DNS + 全球 Anycast（Cloudflare / AWS Global Accelerator）&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;关键变化&lt;/strong&gt;：Keepalived 的角色从&amp;quot;主备入口&amp;quot;变成&amp;quot;K8s / 数据库内部&amp;quot;—— 它&lt;strong&gt;没有消失，只是下沉了&lt;/strong&gt;。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="103-k8s-时代的-vip-替代方案"&gt;10.3 K8s 时代的 VIP 替代方案
+&lt;/h3&gt;&lt;p&gt;2014 年的&amp;quot;VIP 漂移&amp;quot;在 K8s 时代有了新解法：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;K8s Service (ClusterIP)&lt;/strong&gt;：内部自动负载均衡 + 健康检查——VIP 概念被抽象&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;MetalLB&lt;/strong&gt;（2024-2026 稳定）：K8s 集群内的&amp;quot;LoadBalancer&amp;quot;实现——给 bare-metal 集群提供 VIP 能力&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Ingress-Nginx + ExternalDNS&lt;/strong&gt;：把 K8s 服务暴露到公网，&lt;strong&gt;VIP 概念被 DNS 替代&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Cilium + BGP&lt;/strong&gt;：基于 eBPF 的网络方案，&lt;strong&gt;VIP 通过 BGP 协议声明&lt;/strong&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;span class="lnt"&gt;9
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-yaml" data-lang="yaml"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;# MetalLB 2024 主流配置（替代 Keepalived 在 K8s 中的角色）&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;apiVersion&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;metallb.io/v1beta1&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;kind&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;IPAddressPool&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;metadata&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;production&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;namespace&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;metallb-system&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;spec&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;addresses&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;- &lt;span class="m"&gt;192.168.6.100-192.168.6.110&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;# VIP 池&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;2024 主流选择&lt;/strong&gt;：新项目直接上 K8s + MetalLB；老项目继续 Keepalived 不动——&lt;strong&gt;两者并不冲突&lt;/strong&gt;。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="104-现代-ha-方案的5-个特性对比"&gt;10.4 现代 HA 方案的&amp;quot;5 个特性&amp;quot;对比
+&lt;/h3&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;方案&lt;/th&gt;
+					&lt;th&gt;自动漂移&lt;/th&gt;
+					&lt;th&gt;健康检查&lt;/th&gt;
+					&lt;th&gt;跨地域&lt;/th&gt;
+					&lt;th&gt;与服务发现集成&lt;/th&gt;
+					&lt;th&gt;复杂度&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;Nginx + Keepalived&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅（脚本）&lt;/td&gt;
+					&lt;td&gt;❌&lt;/td&gt;
+					&lt;td&gt;❌&lt;/td&gt;
+					&lt;td&gt;低&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;HAProxy + Keepalived&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅（内置）&lt;/td&gt;
+					&lt;td&gt;❌&lt;/td&gt;
+					&lt;td&gt;❌&lt;/td&gt;
+					&lt;td&gt;低&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;LVS + Keepalived&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;❌&lt;/td&gt;
+					&lt;td&gt;❌&lt;/td&gt;
+					&lt;td&gt;中&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;K8s Service + MetalLB&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;弱&lt;/td&gt;
+					&lt;td&gt;✅（K8s 原生）&lt;/td&gt;
+					&lt;td&gt;中&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;云 SLB（阿里/AWS）&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;极低&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;Istio / Service Mesh&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;高&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;Cloudflare Load Balancer&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;✅&lt;/td&gt;
+					&lt;td&gt;极低&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;2024+ 选型经验&lt;/strong&gt;：小团队用云 SLB / Cloudflare；中等规模 K8s + MetalLB；大规模 Istio / Linkerd；政企 / 信创 Keepalived + 国密 SSL。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="105-面试题补充2024-视角"&gt;10.5 面试题补充（2024+ 视角）
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;Q：Keepalived 的 VRRP 协议在 IPv6 时代还有用吗？&lt;/strong&gt;
+A：有用。&lt;strong&gt;VRRPv3（RFC 5798）&lt;/strong&gt; 同时支持 IPv4 和 IPv6，2024+ 国产化 IPv6 改造里 Keepalived 仍是首选 HA 方案。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Q：脑裂问题在 K8s 时代怎么解决？&lt;/strong&gt;
+A：K8s 通过 &lt;strong&gt;etcd + Raft 协议&lt;/strong&gt;避免脑裂——集群状态写入 etcd，多数节点同意才算&amp;quot;主&amp;quot;。这是分布式系统层面的&amp;quot;反脑裂&amp;quot;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Q：为什么云厂商几乎不用 Keepalived？&lt;/strong&gt;
+A：云厂商用&lt;strong&gt;底层网络设备的 Anycast + ECMP&lt;/strong&gt; 实现 LB，Keepalived 是&amp;quot;用户态方案&amp;quot;，在大规模下性能 / 可观测性都比不上硬件方案。但&lt;strong&gt;对中小企业，Keepalived 仍然是性价比最高的选择&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Q：Nginx + Keepalived 在 AI 时代还能用吗？&lt;/strong&gt;
+A：&lt;strong&gt;能。&lt;/strong&gt; AI 服务的入口（推理 API 网关）本质上还是 HTTP，Nginx + Keepalived 一样能跑。区别是 Nginx 需要装 &lt;strong&gt;ngx_http_auth_request_module&lt;/strong&gt; 之类的模块对接 AI 鉴权。&lt;/p&gt;
+&lt;h3 id="106-个人总结10-年技术演进的启示"&gt;10.6 个人总结：10 年技术演进的&amp;quot;启示&amp;quot;
+&lt;/h3&gt;&lt;p&gt;写这篇文章时我刚毕业 1 年，&lt;strong&gt;Keepalived 是我接触的第一个&amp;quot;高可用&amp;quot;方案&lt;/strong&gt;。10 年后再看：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;协议层的稳定性 &amp;gt; 框架的时髦度&lt;/strong&gt;——VRRP 10 年没变，Spring Cloud / Dubbo 换了 3 套&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&amp;ldquo;够用&amp;quot;比&amp;quot;更好&amp;quot;更重要&lt;/strong&gt;——Keepalived 不是最优解，但 10 年后仍是&amp;quot;够用&amp;rdquo; 的方案&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;云时代不等于&amp;quot;传统方案已死&amp;quot;&lt;/strong&gt;——Keepalived 仍在政企 / 信创 / 数据库 HA 场景下活得很好&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;架构选型要&amp;quot;看 10 年&amp;quot;&lt;/strong&gt;——2014 年选 Keepalived 的项目，2024 年大多还在用&lt;/li&gt;
+&lt;/ol&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;2024+ 给后辈的建议&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;面试要会 VRRP 原理&lt;/strong&gt;——它是 Keepalived / LVS / HSRP 的共同基础&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;生产要懂 K8s Service&lt;/strong&gt;——新项目都用这个&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;架构要懂 BGP / Anycast&lt;/strong&gt;——云时代的 HA 底层&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;传统行业要会用 Keepalived&lt;/strong&gt;——政企 / 银行 / 信创 仍是主力&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;
+&lt;p&gt;10 年后，&lt;strong&gt;VRRP 协议可能还是不会变&lt;/strong&gt;——这就是&amp;quot;基础设施&amp;quot;的浪漫。&lt;/p&gt;
+&lt;h2 id="参考资料2024-补充"&gt;参考资料（2024+ 补充）
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/acassen/keepalived" target="_blank" rel="noopener"
+ &gt;Keepalived 官方 GitHub&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://metallb.universe.tf/" target="_blank" rel="noopener"
+ &gt;MetalLB 项目&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://datatracker.ietf.org/doc/html/rfc5798" target="_blank" rel="noopener"
+ &gt;VRRPv3 RFC 5798&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://cilium.io/" target="_blank" rel="noopener"
+ &gt;Cilium eBPF 网络&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://istio.io/" target="_blank" rel="noopener"
+ &gt;Istio 服务网格&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.cloudflare.com/load-balancing/" target="_blank" rel="noopener"
+ &gt;Cloudflare Load Balancing&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.oschina.net/news/270000" target="_blank" rel="noopener"
+ &gt;国产化 HA 方案：Keepalived 在信创场景&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>

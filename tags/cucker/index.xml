@@ -1,0 +1,459 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Cucker on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/cucker/</link><description>Recent content in Cucker on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Wed, 15 Mar 2017 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/cucker/index.xml" rel="self" type="application/rss+xml"/><item><title>Docker 容器启动命令还原：cucker / runlike 工具对比</title><link>https://liangweidonggood.github.io/p/docker-recover-run-command/</link><pubDate>Wed, 15 Mar 2017 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/docker-recover-run-command/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/docker-recover-run-command/image/cover.jpg" alt="Featured image of post Docker 容器启动命令还原：cucker / runlike 工具对比" /&gt;&lt;p&gt;容器跑久了之后，&lt;strong&gt;谁、用什么参数起的&lt;/strong&gt;经常说不清。&lt;code&gt;docker inspect&lt;/code&gt; 能看到参数但格式反人类，&lt;strong&gt;没有一个工具能直接还原成 &lt;code&gt;docker run&lt;/code&gt; 命令&lt;/strong&gt;就是问题。&lt;/p&gt;
+&lt;p&gt;社区里有三个工具专门干这事：&lt;strong&gt;cucker/get_command_4_run_container&lt;/strong&gt;、&lt;strong&gt;assaflavie/runlike&lt;/strong&gt;、&lt;strong&gt;joinsunsoft/runcommand&lt;/strong&gt;。这一篇把它们的使用、差异、坑点一次性说清楚。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;阅读对象&lt;/strong&gt;：需要批量迁移容器、查历史启动参数、自动化复现容器配置的运维 / 开发者
+&lt;strong&gt;覆盖范围&lt;/strong&gt;：三个工具的对比 + 实战演示 + 自定义 alias + 边界场景&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="一问题为什么看启动参数这么难"&gt;一、问题：为什么&amp;quot;看启动参数&amp;quot;这么难
+&lt;/h2&gt;&lt;p&gt;&lt;code&gt;docker inspect&lt;/code&gt; 能看所有配置，但&lt;strong&gt;输出的 JSON 字段名和 &lt;code&gt;docker run&lt;/code&gt; 参数不一一对应&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker inspect mysql01 &lt;span class="p"&gt;|&lt;/span&gt; jq &lt;span class="s1"&gt;&amp;#39;.[0].Config.Env&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;[&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s2"&gt;&amp;#34;MYSQL_ROOT_PASSWORD=py123456&amp;#34;&lt;/span&gt;,
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s2"&gt;&amp;#34;PATH=/usr/local/sbin:/usr/local/bin:...&amp;#34;&lt;/span&gt;,
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; ...
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;]&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker inspect mysql01 &lt;span class="p"&gt;|&lt;/span&gt; jq &lt;span class="s1"&gt;&amp;#39;.[0].HostConfig.PortBindings&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s2"&gt;&amp;#34;3306/tcp&amp;#34;&lt;/span&gt;: &lt;span class="o"&gt;[&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s2"&gt;&amp;#34;HostIp&amp;#34;&lt;/span&gt;: &lt;span class="s2"&gt;&amp;#34;&amp;#34;&lt;/span&gt;,
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="s2"&gt;&amp;#34;HostPort&amp;#34;&lt;/span&gt;: &lt;span class="s2"&gt;&amp;#34;13306&amp;#34;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="o"&gt;]&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;要把这些&lt;strong&gt;反向工程&lt;/strong&gt;成 &lt;code&gt;docker run -d --name mysql01 -p 13306:3306 -e MYSQL_ROOT_PASSWORD=py123456 mysql&lt;/code&gt;，&lt;strong&gt;光看 JSON 就要在脑子里做几层翻译&lt;/strong&gt;。三个工具就是干这个的。&lt;/p&gt;
+&lt;h2 id="二cuckerget_command_4_run_container"&gt;二、cucker/get_command_4_run_container
+&lt;/h2&gt;&lt;p&gt;最老牌、用得最多的工具，&lt;strong&gt;Docker Hub 上被 pull 了 100w+ 次&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="21-拉取--跑"&gt;2.1 拉取 + 跑
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 拉镜像&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull cucker/get_command_4_run_container:1.3
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 还原容器的启动命令&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run --rm -v /var/run/docker.sock:/var/run/docker.sock &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; cucker/get_command_4_run_container:1.3 &amp;lt;container-name-or-id&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;关键点&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;--rm&lt;/code&gt;——跑完就删容器&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-v /var/run/docker.sock:/var/run/docker.sock&lt;/code&gt;——挂载 docker daemon 的 socket，&lt;strong&gt;让容器内的工具能跟宿主机的 daemon 通信&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="22-输出示例"&gt;2.2 输出示例
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;span class="lnt"&gt;9
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; cucker/get_command_4_run_container:1.3 mysql01
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -d &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --name mysql01 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --env &lt;span class="nv"&gt;MYSQL_ROOT_PASSWORD&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;py123456 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -p 13306:3306/tcp &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --restart&lt;span class="o"&gt;=&lt;/span&gt;always &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; mysql
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;直接复制粘贴就能跑&lt;/strong&gt;。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="23-配合-alias-用"&gt;2.3 配合 alias 用
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# ~/.bashrc&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nb"&gt;alias&lt;/span&gt; &lt;span class="nv"&gt;get_run_command&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s1"&gt;&amp;#39;docker run --rm -v /var/run/docker.sock:/var/run/docker.sock cucker/get_command_4_run_container:1.3&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 用&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;get_run_command mysql01
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="三assaflavierunlike"&gt;三、assaflavie/runlike
+&lt;/h2&gt;&lt;p&gt;另一个流行工具，&lt;strong&gt;和 cucker 类似但输出格式略有不同&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="31-用法"&gt;3.1 用法
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 拉镜像&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull assaflavie/runlike
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 还原&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run --rm -v /var/run/docker.sock:/var/run/docker.sock &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; assaflavie/runlike &amp;lt;container-name-or-id&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="32-差异"&gt;3.2 差异
+&lt;/h3&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;维度&lt;/th&gt;
+					&lt;th&gt;cucker&lt;/th&gt;
+					&lt;th&gt;runlike&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;输出格式&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;docker run -d \\\n --name xxx \\\n ...&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;docker run -d --name xxx ...&lt;/code&gt;（一行）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;命名&lt;/td&gt;
+					&lt;td&gt;短名（&lt;code&gt;mysql01&lt;/code&gt;）&lt;/td&gt;
+					&lt;td&gt;FQDN（&lt;code&gt;/mysql01&lt;/code&gt;，带斜杠）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;网络&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;--network=bridge&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;--network=bridge&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;多网络&lt;/td&gt;
+					&lt;td&gt;部分支持&lt;/td&gt;
+					&lt;td&gt;支持更全&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;维护&lt;/td&gt;
+					&lt;td&gt;偶尔更新&lt;/td&gt;
+					&lt;td&gt;较活跃&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="四joinsunsoftruncommand"&gt;四、joinsunsoft/runcommand
+&lt;/h2&gt;&lt;p&gt;第三个工具，相对小众，&lt;strong&gt;但支持输出 docker-compose 格式&lt;/strong&gt;。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run --rm -v /var/run/docker.sock:/var/run/docker.sock &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; joinsunsoft/runcommand loki
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;特色&lt;/strong&gt;：能输出 YAML 格式的 docker-compose 配置。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="五批量还原所有容器"&gt;五、批量还原所有容器
+&lt;/h2&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 所有运行中容器&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;for&lt;/span&gt; CONTAINER in &lt;span class="k"&gt;$(&lt;/span&gt;docker ps --format &lt;span class="s1"&gt;&amp;#39;{{.Names}}&amp;#39;&lt;/span&gt;&lt;span class="k"&gt;)&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;&amp;#34;=== &lt;/span&gt;&lt;span class="nv"&gt;$CONTAINER&lt;/span&gt;&lt;span class="s2"&gt; ===&amp;#34;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; docker run --rm -v /var/run/docker.sock:/var/run/docker.sock &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; cucker/get_command_4_run_container:1.3 &lt;span class="nv"&gt;$CONTAINER&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;done&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;典型场景&lt;/strong&gt;：接手一个&amp;quot;无文档&amp;quot;的 Docker 主机，&lt;strong&gt;用这个脚本快速还原整个部署&lt;/strong&gt;。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="六还原-docker-compose-配置"&gt;六、还原 Docker Compose 配置
+&lt;/h2&gt;&lt;p&gt;&lt;code&gt;cucker&lt;/code&gt; 输出的是 &lt;code&gt;docker run&lt;/code&gt; 单条命令。如果容器是用 &lt;code&gt;docker-compose up&lt;/code&gt; 启动的，&lt;strong&gt;实际配置在 &lt;code&gt;docker-compose.yml&lt;/code&gt; 里&lt;/strong&gt;——还原不回来。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;变通方案&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 1. 看容器实际配置&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker inspect &amp;lt;container&amp;gt; &amp;gt; /tmp/container.json
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 2. 用 jq 提取关键字段&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker inspect &amp;lt;container&amp;gt; &lt;span class="p"&gt;|&lt;/span&gt; jq &lt;span class="s1"&gt;&amp;#39;.[0].Config.Env&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker inspect &amp;lt;container&amp;gt; &lt;span class="p"&gt;|&lt;/span&gt; jq &lt;span class="s1"&gt;&amp;#39;.[0].HostConfig.PortBindings&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker inspect &amp;lt;container&amp;gt; &lt;span class="p"&gt;|&lt;/span&gt; jq &lt;span class="s1"&gt;&amp;#39;.[0].Mounts&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;或者用社区脚本 &lt;a class="link" href="https://github.com/nexdrew/rekcod" target="_blank" rel="noopener"
+ &gt;&lt;code&gt;rekcod&lt;/code&gt;&lt;/a&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 把任意容器还原成 docker-compose.yml&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run --rm -v /var/run/docker.sock:/var/run/docker.sock &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; nexdrew/rekcod &amp;lt;container&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="七常见坑"&gt;七、常见坑
+&lt;/h2&gt;&lt;h3 id="71-permission-denied-挂载-socket"&gt;7.1 &lt;code&gt;permission denied&lt;/code&gt; 挂载 socket
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock cucker/get_command_4_run_container:1.3 mysql
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker: error during connect: ... permission denied
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;解决&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Linux&lt;/strong&gt;：当前用户在 &lt;code&gt;docker&lt;/code&gt; 用户组里，或者用 &lt;code&gt;sudo&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Mac/Windows (Docker Desktop)&lt;/strong&gt;：socket 路径在 VM 里，默认配置应该 OK&lt;/li&gt;
+&lt;/ul&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# Linux 上加 docker 组&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo usermod -aG docker &lt;span class="nv"&gt;$USER&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;newgrp docker
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="72-还原出来的命令跑不起来"&gt;7.2 还原出来的命令&lt;strong&gt;跑不起来&lt;/strong&gt;
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;Why&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;镜像已被删除（&lt;code&gt;docker rmi&lt;/code&gt; 过）&lt;/li&gt;
+&lt;li&gt;网络 / 卷不存在&lt;/li&gt;
+&lt;li&gt;端口冲突&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;code&gt;cucker&lt;/code&gt; / &lt;code&gt;runlike&lt;/code&gt; 只还原&lt;strong&gt;配置&lt;/strong&gt;，不还原&lt;strong&gt;前置依赖&lt;/strong&gt;。&lt;strong&gt;先验证镜像还在&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker images &lt;span class="p"&gt;|&lt;/span&gt; grep mysql
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;mysql latest 7d0a4dc9b... &lt;span class="m"&gt;2&lt;/span&gt; weeks ago 546MB
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="73-容器里有-bind-mount-到宿主机路径"&gt;7.3 容器里有 bind mount 到宿主机路径
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;cucker&lt;/code&gt; 还原的命令&lt;strong&gt;会保留&lt;/strong&gt; &lt;code&gt;-v /host/path:/container/path&lt;/code&gt;，但如果目标宿主机上 &lt;code&gt;/host/path&lt;/code&gt; 不存在，启动会失败。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;配合 &lt;code&gt;creates&lt;/code&gt; 标记&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 在还原的命令前先确保路径&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;mkdir -p /host/path
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 再跑还原的命令&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -d --name xxx -v /host/path:/container/path ...
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="74-docker-run-输出和-docker-composeyml-不一样"&gt;7.4 &lt;code&gt;docker run&lt;/code&gt; 输出和 &lt;code&gt;docker-compose.yml&lt;/code&gt; 不一样
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;实例&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 实际启动：docker-compose.yml&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;version: &lt;span class="s2"&gt;&amp;#34;3&amp;#34;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;services:
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; nginx:
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; image: nginx:1.19
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; ports:
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; - &lt;span class="s2"&gt;&amp;#34;8080:80&amp;#34;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; volumes:
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; - ./html:/usr/share/nginx/html
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; restart: always
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# cucker 还原&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -d --name nginx -p 8080:80 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /root/project/html:/usr/share/nginx/html &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --restart&lt;span class="o"&gt;=&lt;/span&gt;always nginx:1.19
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;Why 不一样&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;compose 会自动加 &lt;code&gt;--name &amp;lt;project&amp;gt;_&amp;lt;service&amp;gt;_&amp;lt;index&amp;gt;&lt;/code&gt;（如 &lt;code&gt;project_nginx_1&lt;/code&gt;）&lt;/li&gt;
+&lt;li&gt;compose 自动加 &lt;code&gt;com.docker.compose.*&lt;/code&gt; 标签&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;bind mount 的相对路径&lt;/strong&gt;变成绝对路径&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;
+&lt;p&gt;&lt;strong&gt;生产建议&lt;/strong&gt;：&lt;strong&gt;别用 cucker 还原 compose 启动的容器&lt;/strong&gt;——直接读 compose 文件最准。&lt;/p&gt;
+&lt;h2 id="八工具对比"&gt;八、工具对比
+&lt;/h2&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;维度&lt;/th&gt;
+					&lt;th&gt;cucker&lt;/th&gt;
+					&lt;th&gt;runlike&lt;/th&gt;
+					&lt;th&gt;runcommand&lt;/th&gt;
+					&lt;th&gt;rekcod&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;输出格式&lt;/td&gt;
+					&lt;td&gt;docker run&lt;/td&gt;
+					&lt;td&gt;docker run&lt;/td&gt;
+					&lt;td&gt;docker run&lt;/td&gt;
+					&lt;td&gt;docker-compose&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;镜像大小&lt;/td&gt;
+					&lt;td&gt;~30MB&lt;/td&gt;
+					&lt;td&gt;~20MB&lt;/td&gt;
+					&lt;td&gt;~25MB&lt;/td&gt;
+					&lt;td&gt;~30MB&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;多网络支持&lt;/td&gt;
+					&lt;td&gt;部分&lt;/td&gt;
+					&lt;td&gt;是&lt;/td&gt;
+					&lt;td&gt;是&lt;/td&gt;
+					&lt;td&gt;是&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;维护活跃&lt;/td&gt;
+					&lt;td&gt;偶尔&lt;/td&gt;
+					&lt;td&gt;活跃&lt;/td&gt;
+					&lt;td&gt;少更新&lt;/td&gt;
+					&lt;td&gt;活跃&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;推荐&lt;/td&gt;
+					&lt;td&gt;⭐⭐⭐⭐&lt;/td&gt;
+					&lt;td&gt;⭐⭐⭐⭐&lt;/td&gt;
+					&lt;td&gt;⭐⭐&lt;/td&gt;
+					&lt;td&gt;⭐⭐⭐&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="九最佳实践"&gt;九、最佳实践
+&lt;/h2&gt;&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;核心生产环境&lt;/strong&gt;：&lt;strong&gt;写好 &lt;code&gt;docker-compose.yml&lt;/code&gt; + Git 版本管理&lt;/strong&gt;——别依赖&amp;quot;事后还原&amp;quot;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;应急查命令&lt;/strong&gt;：&lt;code&gt;cucker&lt;/code&gt; / &lt;code&gt;runlike&lt;/code&gt; 一键还原&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;批量盘点&lt;/strong&gt;：用 for 循环扫所有容器，输出成文档&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;不要&lt;/strong&gt;把&amp;quot;还原命令&amp;quot;作为&amp;quot;日常运维工具&amp;quot;——&lt;strong&gt;SSoT 应该是 compose 文件 / K8s manifest&lt;/strong&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="十要点回顾"&gt;十、要点回顾
+&lt;/h2&gt;&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;cucker / runlike / runcommand / rekcod&lt;/strong&gt; 是社区主流的&amp;quot;反查启动命令&amp;quot;工具&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;必须挂载 &lt;code&gt;/var/run/docker.sock&lt;/code&gt;&lt;/strong&gt;——容器内的工具才能跟 daemon 通信&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;还原的命令可能不能直接跑&lt;/strong&gt;——镜像删除 / 路径不存在 / 端口冲突都常见&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;compose 启动的容器还原出来是 docker run 格式&lt;/strong&gt;——不是 compose&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;生产 SSoT 应该是 compose / K8s manifest&lt;/strong&gt;——还原工具只应急&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="十一小结"&gt;十一、小结
+&lt;/h2&gt;&lt;p&gt;&amp;ldquo;还原启动命令&amp;quot;是接手历史部署、自动化盘点、应急迁移的利器。但&lt;strong&gt;最佳实践仍然是把启动配置写在文件里&lt;/strong&gt;——&lt;code&gt;docker-compose.yml&lt;/code&gt; / K8s manifest，&lt;strong&gt;让 Git 成为 SSoT&lt;/strong&gt;。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;下一步&lt;/strong&gt;：理解了&amp;quot;还原单条启动命令&amp;rdquo;，下一步是&amp;quot;还原整套部署&amp;quot;——&lt;code&gt;rekcod&lt;/code&gt; 风格的 docker-compose 还原、Helm chart 模板化、Kustomize 跨环境覆盖——把&amp;quot;凭记忆启动&amp;quot;变成&amp;quot;声明式部署&amp;quot;。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="参考资料"&gt;参考资料
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/docker-community-tools/docker-runcommand" target="_blank" rel="noopener"
+ &gt;cucker/get_command_4_run_container&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/lavie/runlike" target="_blank" rel="noopener"
+ &gt;assaflavie/runlike&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/joinsunsoft/runcommand" target="_blank" rel="noopener"
+ &gt;joinsunsoft/runcommand&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/nexdrew/rekcod" target="_blank" rel="noopener"
+ &gt;nexdrew/rekcod&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>

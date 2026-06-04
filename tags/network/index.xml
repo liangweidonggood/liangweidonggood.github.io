@@ -1,0 +1,723 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Network on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/network/</link><description>Recent content in Network on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Thu, 20 Jun 2019 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/network/index.xml" rel="self" type="application/rss+xml"/><item><title>Docker 进阶与运维：网络模式、Volume 与镜像加速实战</title><link>https://liangweidonggood.github.io/p/docker-jin-jie-yu-yun-wei/</link><pubDate>Thu, 20 Jun 2019 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/docker-jin-jie-yu-yun-wei/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/docker-jin-jie-yu-yun-wei/image/cover.jpg" alt="Featured image of post Docker 进阶与运维：网络模式、Volume 与镜像加速实战" /&gt;&lt;p&gt;装好 Docker 引擎只是入门。&lt;strong&gt;真正决定一台主机能不能稳定跑生产容器的，是网络、存储和镜像拉取这三件事&lt;/strong&gt;。这一篇围绕&amp;quot;网络模式 + 存储卷 + 镜像代理 + 常见排障&amp;quot;四个高频主题，把零散的运维笔记整理成可复用的参考。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;阅读对象&lt;/strong&gt;：已经能跑 &lt;code&gt;docker run&lt;/code&gt; 的开发者、想把 Docker 用于生产环境或本地自建集群的运维同学
+&lt;strong&gt;覆盖范围&lt;/strong&gt;：bridge / host / none / container / 自定义网络 + Volume 生命周期 + Docker Hub / ghcr / GCR / k8s / Quay 代理 + 故障排查&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="一为什么需要关注网络与存储"&gt;一、为什么需要关注网络与存储
+&lt;/h2&gt;&lt;p&gt;跑一个 &lt;code&gt;hello-world&lt;/code&gt; 很简单，但一旦要把 Docker 真正&amp;quot;用起来&amp;quot;，就会撞到这些问题：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;容器之间怎么互访？同一个 Pod 里的两个 sidecar 容器能直接 &lt;code&gt;localhost&lt;/code&gt; 通信吗？&lt;/li&gt;
+&lt;li&gt;数据库的数据在容器里，删容器数据就没了——怎么持久化？&lt;/li&gt;
+&lt;li&gt;怎么让外部用户访问容器内的服务？&lt;/li&gt;
+&lt;li&gt;不同机器上的容器怎么互联？&lt;/li&gt;
+&lt;li&gt;国内服务器拉 Docker Hub 镜像慢到秒级超时，&lt;strong&gt;K8s 节点拉 CoreDNS 镜像也卡&lt;/strong&gt;怎么办？&lt;/li&gt;
+&lt;li&gt;私有仓库（&lt;code&gt;ghcr.io&lt;/code&gt; / &lt;code&gt;gcr.io&lt;/code&gt; / &lt;code&gt;quay.io&lt;/code&gt;）在国内怎么拉？&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;这些问题的答案，藏在&lt;strong&gt;网络模式、Volume、镜像代理&lt;/strong&gt;三个核心机制里。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;When to use&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;单机多容器互访 → bridge / 自定义网络&lt;/li&gt;
+&lt;li&gt;容器需要&amp;quot;绑定宿主机端口&amp;quot;的高性能场景 → host 网络&lt;/li&gt;
+&lt;li&gt;强隔离、不能联网的安全沙箱 → none 网络&lt;/li&gt;
+&lt;li&gt;数据库、需要长期保存的日志 → Volume（命名卷）/ bind mount&lt;/li&gt;
+&lt;li&gt;跨主机容器互联（Swarm / k8s）→ overlay 网络（本文不展开）&lt;/li&gt;
+&lt;li&gt;国内服务器拉镜像 → 镜像代理（&lt;code&gt;dockerproxy&lt;/code&gt; / &lt;code&gt;ghcr.nju.edu.cn&lt;/code&gt; 等）&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="二容器网络基础docker0-网桥与-veth-pair"&gt;二、容器网络基础：docker0 网桥与 veth pair
+&lt;/h2&gt;&lt;p&gt;Docker 启动时会在宿主机上创建一个叫 &lt;code&gt;docker0&lt;/code&gt; 的&lt;strong&gt;虚拟网桥&lt;/strong&gt;（默认子网 &lt;code&gt;172.17.0.0/16&lt;/code&gt;）。所有以 bridge 模式启动的容器都会接到这张网桥上，&lt;strong&gt;通过这张网桥 + iptables NAT 表与宿主机通信&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;可以用 &lt;code&gt;ifconfig&lt;/code&gt;（或 &lt;code&gt;ip a&lt;/code&gt;）看到 &lt;code&gt;docker0&lt;/code&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ ifconfig
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker0 Link encap:Ethernet HWaddr 02:42:xx:xx:xx:xx
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; inet addr:172.17.0.1 Bcast:172.17.255.255 Mask:255.255.0.0
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; UP BROADCAST RUNNING MULTICAST MTU:1500 Metric:1
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; ...
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;核心机制（veth pair）&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;容器内看到的 &lt;code&gt;eth0&lt;/code&gt; 并不是真正的网卡，而是一对 &lt;strong&gt;veth pair 设备&lt;/strong&gt;的一端&lt;/li&gt;
+&lt;li&gt;另一端放在宿主机，挂到 &lt;code&gt;docker0&lt;/code&gt; 网桥上&lt;/li&gt;
+&lt;li&gt;数据从一端进，另一端出，&lt;strong&gt;等同于一根虚拟网线&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;可以用 &lt;code&gt;brctl show&lt;/code&gt;（来自 &lt;code&gt;bridge-utils&lt;/code&gt; 包）查看网桥上挂了哪些 veth：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ brctl show docker0
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;bridge name bridge id STP enabled interfaces
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker0 8000.0242xxxxxx no vethxxxxxx
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;重要结论&lt;/strong&gt;：&lt;code&gt;docker0&lt;/code&gt; 网桥对外是不可见的，外部网络无法通过 Container-IP 直接访问容器。要让外部访问，&lt;strong&gt;必须做端口映射&lt;/strong&gt;（&lt;code&gt;-p&lt;/code&gt; 参数）。&lt;/p&gt;
+&lt;h2 id="三四种网络模式详解"&gt;三、四种网络模式详解
+&lt;/h2&gt;&lt;p&gt;Docker 在安装时会自动创建三个网络：&lt;code&gt;bridge&lt;/code&gt;（默认）、&lt;code&gt;none&lt;/code&gt;、&lt;code&gt;host&lt;/code&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker network ls
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;NETWORK ID NAME DRIVER SCOPE
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;xxxxx bridge bridge &lt;span class="nb"&gt;local&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;xxxxx host host &lt;span class="nb"&gt;local&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;xxxxx none null &lt;span class="nb"&gt;local&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;创建容器时通过 &lt;code&gt;--net&lt;/code&gt; / &lt;code&gt;--network&lt;/code&gt; 指定：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;模式&lt;/th&gt;
+					&lt;th&gt;指定方式&lt;/th&gt;
+					&lt;th&gt;核心特点&lt;/th&gt;
+					&lt;th&gt;典型场景&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;bridge&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;--net=bridge&lt;/code&gt;（默认）&lt;/td&gt;
+					&lt;td&gt;独立 netns，分配 IP，通过 docker0 + NAT 通信&lt;/td&gt;
+					&lt;td&gt;&lt;strong&gt;90% 场景&lt;/strong&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;host&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;--net=host&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;共享宿主机 netns，无独立 IP&lt;/td&gt;
+					&lt;td&gt;高性能网络服务、监控 agent&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;none&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;--net=none&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;仅有 lo 回环，无任何网络&lt;/td&gt;
+					&lt;td&gt;强隔离、离线批处理&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;container&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;--net=container:NAME&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;共享另一个容器的 netns&lt;/td&gt;
+					&lt;td&gt;sidecar 模式紧密协作&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3 id="31-bridge-模式默认"&gt;3.1 bridge 模式（默认）
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 随机端口映射（大写 P）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -itd --name test1 -P nginx
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 指定端口映射（小写 p）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -itd --name test2 -p 44541:80 nginx
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;访问路径&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-fallback" data-lang="fallback"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;外部网络 → 宿主机 IP:宿主机端口 → iptables DNAT → 容器 IP:容器端口
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;可以用 &lt;code&gt;iptables -t nat -vnL&lt;/code&gt; 看到 Docker 自动添加的 DNAT 规则：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ iptables -t nat -vnL
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;Chain DOCKER &lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="m"&gt;2&lt;/span&gt; references&lt;span class="o"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; pkts bytes target prot opt in out &lt;span class="nb"&gt;source&lt;/span&gt; destination
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt; DNAT tcp -- !docker0 * 0.0.0.0/0 0.0.0.0/0 tcp dpt:44541 to:172.17.0.2:80
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;等价类比&lt;/strong&gt;：bridge 模式 ≈ VMware 里的 NAT 模式——容器有独立 IP、能上网，但需要端口映射才能被外部访问。&lt;/p&gt;
+&lt;h3 id="32-host-模式"&gt;3.2 host 模式
+&lt;/h3&gt;&lt;p&gt;容器&lt;strong&gt;不创建自己的网卡&lt;/strong&gt;，直接使用宿主机的 IP 和端口。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -itd --name test-host --net&lt;span class="o"&gt;=&lt;/span&gt;host nginx
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;优势&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;没有 NAT 转换，性能最佳&lt;/li&gt;
+&lt;li&gt;适合需要&amp;quot;处理大量端口&amp;quot;的服务（如 nginx 反代、Kafka、Prometheus exporter）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;代价&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;容器与宿主机共用网络栈，&lt;strong&gt;端口冲突&lt;/strong&gt;会直接报错&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-p&lt;/code&gt; / &lt;code&gt;--publish&lt;/code&gt; 参数被忽略，会出现 &lt;code&gt;WARNING: Published ports are discarded when using host network mode&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;注意&lt;/strong&gt;：host 网络驱动&lt;strong&gt;只支持 Linux 宿主机&lt;/strong&gt;。Docker Desktop for Mac / Windows / Windows Server 上的 Docker 不支持 host 模式。&lt;/p&gt;
+&lt;p&gt;在 Swarm 集群里也可以使用 host 网络：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker service create --network host nginx
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;控制流量（swarm manager 相关）仍走 overlay 网络，&lt;strong&gt;但 swarm 服务容器本身使用 Docker 守护进程的主机网络和端口发送数据&lt;/strong&gt;——这意味着如果一个服务容器绑定到 80 端口，那么在给定的集群节点上只能运行一个该服务容器。&lt;/p&gt;
+&lt;h3 id="33-none-模式"&gt;3.3 none 模式
+&lt;/h3&gt;&lt;p&gt;容器有独立的 Network Namespace，&lt;strong&gt;但 Docker 不会给它配置任何网络&lt;/strong&gt;。&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;没有 eth0、没有 IP、没有路由&lt;/li&gt;
+&lt;li&gt;只有 &lt;code&gt;lo&lt;/code&gt; 回环网卡&lt;/li&gt;
+&lt;li&gt;完全不能上网&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;典型场景：&lt;strong&gt;安全沙箱&lt;/strong&gt;、&lt;strong&gt;离线批处理任务&lt;/strong&gt;（如敏感数据脱敏、纯计算作业）。&lt;/p&gt;
+&lt;h3 id="34-container-模式"&gt;3.4 container 模式
+&lt;/h3&gt;&lt;p&gt;新创建的容器&lt;strong&gt;共享指定容器的 netns&lt;/strong&gt;，而不是和宿主机共享。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 查看已有容器的 PID&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker inspect -f &lt;span class="s1"&gt;&amp;#39;{{.State.Pid}}&amp;#39;&lt;/span&gt; 5ace523962fc
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="m"&gt;14685&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 验证 net namespace&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ ls -l /proc/14685/ns
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;... net -&amp;gt; net:&lt;span class="o"&gt;[&lt;/span&gt;4026532649&lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="c1"&gt;# 就是这个 net namespace ID&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 创建新容器并共享&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker run -itd --name test3 --net&lt;span class="o"&gt;=&lt;/span&gt;container:5ace523962fc centos bash
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 验证新容器的 net namespace 一致&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker inspect -f &lt;span class="s1"&gt;&amp;#39;{{.State.Pid}}&amp;#39;&lt;/span&gt; 2b7af7c8842d
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="m"&gt;15832&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ ls -l /proc/15832/ns
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;... net -&amp;gt; net:&lt;span class="o"&gt;[&lt;/span&gt;4026532649&lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="c1"&gt;# 跟前面一样&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;特性&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;两个容器共享 IP、端口范围&lt;/li&gt;
+&lt;li&gt;网络之外（文件系统、进程、用户）仍然隔离&lt;/li&gt;
+&lt;li&gt;两个容器的进程可以通过 &lt;code&gt;lo&lt;/code&gt; 通信&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;典型场景：&lt;strong&gt;sidecar 模式&lt;/strong&gt;——主容器和 sidecar 容器（如日志收集器、监控 agent、Service Mesh proxy）共用 netns，方便在 &lt;code&gt;localhost&lt;/code&gt; 上互调。&lt;/p&gt;
+&lt;h2 id="四自定义网络指定-ip--子网"&gt;四、自定义网络：指定 IP / 子网
+&lt;/h2&gt;&lt;p&gt;直接用默认 bridge 模式，&lt;strong&gt;不能给容器指定固定 IP&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 报错：只能在自定义网络指定 IP&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker run -itd --name test4 --network bridge --ip 172.17.0.5 centos:7 /bin/bash
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;Error response from daemon: User specified IP address is supported only when connecting to networks with user configured subnets.
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;正确做法&lt;/strong&gt;：先自定义网络，再指定 IP 启动。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 1. 创建自定义网络（指定子网 + 网卡名）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker network create &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --subnet&lt;span class="o"&gt;=&lt;/span&gt;172.18.0.0/16 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --opt &lt;span class="s2"&gt;&amp;#34;com.docker.network.bridge.name&amp;#34;&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;docker1&amp;#34;&lt;/span&gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; mynetwork
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 2. 用指定 IP 启动容器&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -itd --name test5 --net mynetwork --ip 172.18.0.10 centos /bin/bash
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;参数说明&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;--subnet&lt;/code&gt;：定义子网范围&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;--opt &amp;quot;com.docker.network.bridge.name&amp;quot;=&amp;quot;docker1&amp;quot;&lt;/code&gt;：让 &lt;code&gt;ifconfig -a&lt;/code&gt; 看到的是 &lt;code&gt;docker1&lt;/code&gt;，而不是 &lt;code&gt;br-110eb56a0b22&lt;/code&gt; 这种随机名&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;mynetwork&lt;/code&gt;：网络名，&lt;code&gt;docker network ls&lt;/code&gt; 里的 &lt;code&gt;NAME&lt;/code&gt; 列&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;Why 用自定义网络&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;容器 DNS 自动解析（容器名 → IP），默认 bridge 不支持&lt;/li&gt;
+&lt;li&gt;可以在创建时规划 IP 段&lt;/li&gt;
+&lt;li&gt;适合需要稳定网络拓扑的复杂部署&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;配套的清理命令&lt;/strong&gt;：当自定义网络不再需要时：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 临时把容器从指定网络断开（排查网络问题很有用）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker network disconnect -f bridge &amp;lt;container_name&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 禁用并删除 docker0 网桥&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ifconfig docker0 down
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;brctl delbr docker0
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;注意&lt;/strong&gt;：手工 &lt;code&gt;brctl delbr docker0&lt;/code&gt; 之后，下次 daemon 启动（未指定 &lt;code&gt;-b&lt;/code&gt; 参数）会&lt;strong&gt;自动重建&lt;/strong&gt; &lt;code&gt;docker0&lt;/code&gt;。要真正控制默认网桥，需要在 &lt;code&gt;daemon.json&lt;/code&gt; 里写：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-json" data-lang="json"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nt"&gt;&amp;#34;iptables&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nt"&gt;&amp;#34;bridge&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;&amp;#34;&amp;#34;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;/blockquote&gt;
+&lt;h2 id="五存储卷volume让数据活过容器生命周期"&gt;五、存储卷（Volume）：让数据活过容器生命周期
+&lt;/h2&gt;&lt;p&gt;容器的文件系统是&lt;strong&gt;临时&lt;/strong&gt;的——&lt;code&gt;docker rm&lt;/code&gt; 时容器层全部销毁。&lt;strong&gt;任何需要持久化的数据，都必须挂载到 Volume 或 bind mount。&lt;/strong&gt;&lt;/p&gt;
+&lt;h3 id="51-volume-操作四件套"&gt;5.1 Volume 操作四件套
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 创建&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker volume create mydata
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 查看&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker volume ls
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 删除单个&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker volume rm mydata
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 清理（删所有未挂载的 volume —— 危险）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker volume prune
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="52-两种挂载方式"&gt;5.2 两种挂载方式
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 1. 命名卷（推荐，Docker 自动管理）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -d -v mydata:/var/lib/mysql mysql:5.7
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 2. bind mount（直接挂主机目录，运维最常用）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -d -v /host/path:/container/path nginx
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;维度&lt;/th&gt;
+					&lt;th&gt;Volume&lt;/th&gt;
+					&lt;th&gt;Bind Mount&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;路径&lt;/td&gt;
+					&lt;td&gt;Docker 管理（默认 &lt;code&gt;/var/lib/docker/volumes/&lt;/code&gt;）&lt;/td&gt;
+					&lt;td&gt;任意宿主机路径&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;迁移&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;docker volume&lt;/code&gt; 命令一键迁移&lt;/td&gt;
+					&lt;td&gt;手动 rsync&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;权限&lt;/td&gt;
+					&lt;td&gt;Docker 自动设&lt;/td&gt;
+					&lt;td&gt;手动 chmod&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;适用&lt;/td&gt;
+					&lt;td&gt;数据库、共享数据&lt;/td&gt;
+					&lt;td&gt;配置文件、日志、特殊路径&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3 id="53-关键避坑"&gt;5.3 关键避坑
+&lt;/h3&gt;&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;docker volume prune&lt;/code&gt; 会删所有未挂载的卷&lt;/strong&gt;——生产环境跑这个命令之前必须 &lt;code&gt;docker volume ls&lt;/code&gt; 确认&lt;/li&gt;
+&lt;li&gt;bind mount 时容器内 UID 与宿主机不一致会导致权限问题——用 &lt;code&gt;user: &amp;quot;1000:1000&amp;quot;&lt;/code&gt; 显式指定&lt;/li&gt;
+&lt;li&gt;Volume 在多容器间共享非常合适（如配置中心、日志聚合），但&lt;strong&gt;不能用 tmpfs 替代&lt;/strong&gt;——重启数据就没了&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h3 id="54-配合清理"&gt;5.4 配合清理
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 只删除未使用的网络&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker network prune -f
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 删除 12 小时前创建的网络&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker network prune -a --filter &lt;span class="s2"&gt;&amp;#34;until=12h&amp;#34;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="六镜像代理与加速"&gt;六、镜像代理与加速
+&lt;/h2&gt;&lt;p&gt;国内服务器拉 Docker Hub 镜像&lt;strong&gt;默认会非常慢甚至超时&lt;/strong&gt;。除了 &lt;code&gt;daemon.json&lt;/code&gt; 里配 &lt;code&gt;registry-mirrors&lt;/code&gt;，还可以直接用&lt;strong&gt;镜像代理&lt;/strong&gt;拉特定 registry 的镜像。&lt;/p&gt;
+&lt;h3 id="61-docker-hub-镜像代理"&gt;6.1 Docker Hub 镜像代理
+&lt;/h3&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;场景&lt;/th&gt;
+					&lt;th&gt;官方命令&lt;/th&gt;
+					&lt;th&gt;代理命令&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;用户镜像&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;docker pull stilleshan/frpc:latest&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;docker pull dockerproxy.com/stilleshan/frpc:latest&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;根镜像（library）&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;docker pull nginx:latest&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;docker pull dockerproxy.net/library/nginx:latest&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;code&gt;dockerproxy.com&lt;/code&gt; 和 &lt;code&gt;dockerproxy.net&lt;/code&gt; 是两个常用的镜像代理。&lt;strong&gt;根镜像（&lt;code&gt;library/xxx&lt;/code&gt;）必须显式写 &lt;code&gt;library/&lt;/code&gt;&lt;/strong&gt;——这是和用户镜像最大的区别。&lt;/p&gt;
+&lt;h3 id="62-github-container-registry-ghcrio"&gt;6.2 GitHub Container Registry (ghcr.io)
+&lt;/h3&gt;&lt;p&gt;2019 年 9 月 GitHub 即将开放公开测试的 &lt;code&gt;ghcr.io&lt;/code&gt;，配合 GitHub Actions 的 &lt;code&gt;docker push&lt;/code&gt; 流程，越来越多的开源项目（包括很多 K8s 生态组件）开始把镜像推到 ghcr 而非 Docker Hub。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 官方&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull ghcr.io/username/image:tag
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 代理&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull ghcr.dockerproxy.com/username/image:tag
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;南京大学的 ghcr 加速&lt;/strong&gt;：&lt;code&gt;ghcr.nju.edu.cn&lt;/code&gt; 是高校里对 ghcr 比较稳定的镜像（南大信管系维护）。速度通常比走 dockerproxy 更快，适合学术 / 教学环境。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="63-google-container-registry-gcrio-与-k8sgcrio"&gt;6.3 Google Container Registry (gcr.io) 与 k8s.gcr.io
+&lt;/h3&gt;&lt;p&gt;K8s 自身组件（&lt;code&gt;coredns&lt;/code&gt;、&lt;code&gt;kube-proxy&lt;/code&gt;、&lt;code&gt;etcd&lt;/code&gt; 等）都托管在 &lt;code&gt;k8s.gcr.io&lt;/code&gt;（2018 年起）或新地址 &lt;code&gt;registry.k8s.io&lt;/code&gt;（2019 年开始迁移）。国内拉这些镜像&lt;strong&gt;几乎必走代理&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# GCR 官方&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull gcr.io/username/image:tag
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# GCR 代理&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull gcr.dockerproxy.com/username/image:tag
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# K8s 镜像（CNCF 仓库，从 k8s 1.11 开始 CoreDNS 取代 kube-dns 成为默认 DNS）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull k8s.gcr.io/coredns:1.6.5
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull registry.k8s.io/coredns:1.6.5
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 代理&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull k8s.dockerproxy.com/coredns:1.6.5
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;code&gt;CoreDNS 1.6.5&lt;/code&gt; 是 2019 年中比较常用的稳定版本——CNI 插件、&lt;code&gt;KubeDNS&lt;/code&gt; 替换等场景都会用到。&lt;/p&gt;
+&lt;h3 id="64-quayio"&gt;6.4 Quay.io
+&lt;/h3&gt;&lt;p&gt;Red Hat 系镜像（&lt;code&gt;coreos/etcd&lt;/code&gt; 旧版本、Operator Framework 等）大多托管在 Quay：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 官方&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull quay.io/username/image:tag
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 代理&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker pull quay.dockerproxy.com/username/image:tag
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="65-加速效果对比"&gt;6.5 加速效果对比
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 测速（删本地缓存后用 time 计时）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker rmi node:latest
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nb"&gt;time&lt;/span&gt; docker pull node:latest
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;ul&gt;
+&lt;li&gt;直连 Docker Hub：~1m14s（国内典型）&lt;/li&gt;
+&lt;li&gt;用镜像代理：~5-15s（视镜像大小）&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;注意&lt;/strong&gt;：公开镜像代理可能因合规或运营原因失效。生产环境建议&lt;strong&gt;自建 mirror&lt;/strong&gt;（用 &lt;code&gt;registry&lt;/code&gt; 镜像 + 反代），或者用云厂商（阿里云 ACR、DaoCloud）的企业级加速服务。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="七常见问题与排障"&gt;七、常见问题与排障
+&lt;/h2&gt;&lt;h3 id="71-warning-ipv4-forwarding-is-disabled"&gt;7.1 WARNING: IPv4 forwarding is disabled
+&lt;/h3&gt;&lt;p&gt;容器网络不通，dockerd 启动时打这条警告。&lt;strong&gt;生产环境装完 Docker 必须先修这个&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 临时启用&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sysctl -w net.ipv4.ip_forward&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="m"&gt;1&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 永久（任选其一）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;&amp;#34;net.ipv4.ip_forward=1&amp;#34;&lt;/span&gt; &amp;gt;&amp;gt; /etc/sysctl.conf
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 或&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;&amp;#34;net.ipv4.ip_forward=1&amp;#34;&lt;/span&gt; &amp;gt;&amp;gt; /usr/lib/sysctl.d/00-system.conf
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 生效&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sysctl -p
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 验证&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sysctl net.ipv4.ip_forward
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 期望输出：net.ipv4.ip_forward = 1&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="72-unknown-or-invalid-runtime-name-docker-runc"&gt;7.2 unknown or invalid runtime name: docker-runc
+&lt;/h3&gt;&lt;p&gt;从老版本（Docker 18.06 之前）升级到 Docker 18.09+ 后，runtime 名从 &lt;code&gt;docker-runc&lt;/code&gt; 改为 &lt;code&gt;runc&lt;/code&gt;，老容器的 &lt;code&gt;hostconfig.json&lt;/code&gt; 还引用老名字，导致容器起不来。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 批量替换&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;grep -rl &lt;span class="s1"&gt;&amp;#39;docker-runc&amp;#39;&lt;/span&gt; /var/lib/docker/containers/ &lt;span class="p"&gt;|&lt;/span&gt; xargs sed -i &lt;span class="s1"&gt;&amp;#39;s/docker-runc/runc/g&amp;#39;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;systemctl stop docker
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;systemctl start docker
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="73-live-restore让容器在-daemon-重启时不停机"&gt;7.3 live-restore：让容器在 daemon 重启时不停机
+&lt;/h3&gt;&lt;p&gt;升级 Docker daemon 或 daemon 崩溃时，&lt;strong&gt;默认会停掉所有正在运行的容器&lt;/strong&gt;。开启 &lt;code&gt;live-restore&lt;/code&gt; 可让容器继续运行：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-json" data-lang="json"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nt"&gt;&amp;#34;live-restore&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;systemctl daemon-reload
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;sudo systemctl reload docker.service &lt;span class="c1"&gt;# 注意是 reload 不是 restart&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker info &lt;span class="p"&gt;|&lt;/span&gt; grep -i live &lt;span class="c1"&gt;# 验证：Live Restore Enabled: true&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;之后 &lt;code&gt;systemctl restart docker&lt;/code&gt; 时，容器不会停。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;多机同步&lt;/strong&gt;：在 K8s 集群里，可以用脚本批量同步 &lt;code&gt;daemon.json&lt;/code&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;for&lt;/span&gt; NODE in master2 master3 worker1 worker3 worker4 worker5 worker6 worker7 worker8 worker9&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="nv"&gt;$NODE&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; scp /etc/docker/daemon.json &lt;span class="nv"&gt;$NODE&lt;/span&gt;:/etc/docker/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; ssh root@&lt;span class="nv"&gt;$NODE&lt;/span&gt; &lt;span class="s2"&gt;&amp;#34;systemctl daemon-reload &amp;amp;&amp;amp; systemctl reload docker &amp;amp;&amp;amp; systemctl restart docker&amp;#34;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;done&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;/blockquote&gt;
+&lt;h3 id="74-network-disconnect容器临时断网"&gt;7.4 network disconnect：容器临时断网
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 临时把容器从指定网络断开&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker network disconnect -f bridge &amp;lt;container_name&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;排查网络问题时很有用——能快速判断&amp;quot;是容器问题还是网络问题&amp;quot;。&lt;/p&gt;
+&lt;h2 id="八核心要点--常见坑"&gt;八、核心要点 / 常见坑
+&lt;/h2&gt;&lt;p&gt;把这一篇的要点压缩成 8 条：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;bridge 模式是默认&lt;/strong&gt;（90% 场景），host 模式换性能换隔离，none 模式是沙箱&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;端口映射必须用 &lt;code&gt;-p&lt;/code&gt;&lt;/strong&gt;——bridge 模式下不映射外部访问不了&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;容器共享 netns&lt;/strong&gt;用 &lt;code&gt;container&lt;/code&gt; 模式，sidecar 利器&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;指定固定 IP&lt;/strong&gt;必须用自定义网络，默认 bridge 不支持&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;数据持久化&lt;/strong&gt;用 Volume，&lt;code&gt;docker volume prune&lt;/code&gt; 是危险命令&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;bind mount vs Volume&lt;/strong&gt;：配置/日志用 bind mount，数据库用 Volume&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;国内拉镜像&lt;/strong&gt;必须用代理或 mirror——&lt;code&gt;dockerproxy&lt;/code&gt; 系列、&lt;strong&gt;&lt;code&gt;ghcr.nju.edu.cn&lt;/code&gt;&lt;/strong&gt;、阿里云、DaoCloud 都要会&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;live-restore&lt;/strong&gt; 是 daemon 升级不停机的关键配置&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="九小结"&gt;九、小结
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;网络模式&lt;/strong&gt;：4 种核心模式（bridge / host / none / container）+ 自定义网络，理解 veth pair 是关键&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;存储卷&lt;/strong&gt;：Volume 管数据生命周期，bind mount 管配置文件，两手都要硬&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;镜像代理&lt;/strong&gt;：&lt;code&gt;dockerproxy&lt;/code&gt; 系列覆盖 Docker Hub / GCR / k8s.gcr.io / Quay，&lt;code&gt;ghcr.nju.edu.cn&lt;/code&gt; 补足 ghcr&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;排障思路&lt;/strong&gt;：先看 &lt;code&gt;docker info&lt;/code&gt; 状态、再看 &lt;code&gt;journalctl -u docker&lt;/code&gt; 日志、最后看 iptables 和 netns&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;下一步&lt;/strong&gt;：单机 Docker 玩熟之后，下一步就是 Swarm / Kubernetes 的多机编排——那时网络（overlay / flannel / calico）、存储（Rexray / CSI）、调度（scheduler）都会变成新的核心议题。在 2019 年的 K8s 生态里，&lt;strong&gt;CoreDNS 已经取代 kube-dns 成为默认 DNS&lt;/strong&gt;，&lt;code&gt;ghcr.io&lt;/code&gt; 即将开放公开测试，镜像分发的格局正在重写——提前理解这些变化能少踩很多坑。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="参考资料"&gt;参考资料
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;a class="link" href="https://docs.docker.com/network/drivers/" target="_blank" rel="noopener"
+ &gt;Docker 网络驱动官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://docs.docker.com/network/" target="_blank" rel="noopener"
+ &gt;Docker 网络模式详解&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://docs.docker.com/storage/volumes/" target="_blank" rel="noopener"
+ &gt;Docker Volume 官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://dockerproxy.com/" target="_blank" rel="noopener"
+ &gt;dockerproxy 镜像代理&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://ghcr.nju.edu.cn" target="_blank" rel="noopener"
+ &gt;南京大学 ghcr 镜像加速&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/coredns/coredns" target="_blank" rel="noopener"
+ &gt;CoreDNS 官方仓库&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.blog/2019-09-12-introducing-github-container-registry/" target="_blank" rel="noopener"
+ &gt;GitHub Container Registry 公告&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.aliyun.com/product/acr" target="_blank" rel="noopener"
+ &gt;阿里云容器镜像服务 ACR&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://docs.docker.com/config/containers/live-restore/" target="_blank" rel="noopener"
+ &gt;Live Restore 特性说明&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>

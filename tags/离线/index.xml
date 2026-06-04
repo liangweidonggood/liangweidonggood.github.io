@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>离线 on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/%E7%A6%BB%E7%BA%BF/</link><description>Recent content in 离线 on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Wed, 15 Jun 2016 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/%E7%A6%BB%E7%BA%BF/index.xml" rel="self" type="application/rss+xml"/><item><title>Docker 镜像与容器导入导出：save/load/export/import 实战</title><link>https://liangweidonggood.github.io/p/docker-image-container-import-export/</link><pubDate>Wed, 15 Jun 2016 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/docker-image-container-import-export/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/docker-image-container-import-export/image/cover.jpg" alt="Featured image of post Docker 镜像与容器导入导出：save/load/export/import 实战" /&gt;&lt;p&gt;&amp;ldquo;我要把 A 服务器上跑得好好的容器，搬到 B 服务器上去&amp;rdquo;——这种需求在生产环境很常见，&lt;strong&gt;但很多人会卡在 &lt;code&gt;save&lt;/code&gt; / &lt;code&gt;export&lt;/code&gt; 该用哪个&lt;/strong&gt;。这一篇把镜像 / 容器的导入导出分清楚，再给出几个常见场景的实战方案。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;阅读对象&lt;/strong&gt;：需要在不同环境之间迁移容器 / 镜像、要做离线备份的运维 / 开发者
+&lt;strong&gt;覆盖范围&lt;/strong&gt;：save vs export + load vs import + 容器打包成新镜像 + 批量备份脚本&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="一四种命令的差异"&gt;一、四种命令的差异
+&lt;/h2&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;命令&lt;/th&gt;
+					&lt;th&gt;对象&lt;/th&gt;
+					&lt;th&gt;保留历史&lt;/th&gt;
+					&lt;th&gt;保留元数据&lt;/th&gt;
+					&lt;th&gt;典型用途&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;docker save&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;镜像&lt;/td&gt;
+					&lt;td&gt;&lt;strong&gt;是&lt;/strong&gt;（所有层）&lt;/td&gt;
+					&lt;td&gt;是&lt;/td&gt;
+					&lt;td&gt;镜像备份、离线迁移&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;docker load&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;镜像&lt;/td&gt;
+					&lt;td&gt;加载 save 产物&lt;/td&gt;
+					&lt;td&gt;是&lt;/td&gt;
+					&lt;td&gt;镜像恢复&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;docker export&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;容器&lt;/td&gt;
+					&lt;td&gt;&lt;strong&gt;否&lt;/strong&gt;（扁平化）&lt;/td&gt;
+					&lt;td&gt;否&lt;/td&gt;
+					&lt;td&gt;容器快照&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;code&gt;docker import&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;容器 export 产物&lt;/td&gt;
+					&lt;td&gt;加载成新镜像&lt;/td&gt;
+					&lt;td&gt;否&lt;/td&gt;
+					&lt;td&gt;从容器快照恢复&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;核心区别&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;save&lt;/code&gt; / &lt;code&gt;load&lt;/code&gt;&lt;/strong&gt; 操作的是&lt;strong&gt;镜像&lt;/strong&gt;，保留&lt;strong&gt;完整历史&lt;/strong&gt;（每一层构建步骤、tag、标签）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;export&lt;/code&gt; / &lt;code&gt;import&lt;/code&gt;&lt;/strong&gt; 操作的是&lt;strong&gt;容器当前文件系统快照&lt;/strong&gt;，&lt;strong&gt;扁平化&lt;/strong&gt;成单层，&lt;strong&gt;丢失历史&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;export&lt;/code&gt; 出来的 import 后默认无 tag&lt;/strong&gt;，需要手动 &lt;code&gt;docker tag&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="二save--load镜像备份与离线迁移"&gt;二、save / load：镜像备份与离线迁移
+&lt;/h2&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 导出镜像（保留原名称和 tag）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker save &amp;lt;IMAGE_NAME&amp;gt;:&amp;lt;IMAGE TAG&amp;gt; &amp;gt; save.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 实际例子&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker save nginx:1.19.9-alpine &amp;gt; nginx1.19.9-alpine.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker save mysql:8.0.23 &amp;gt; mysql8.0.23.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker save influxdb:2.0.4-alpine &amp;gt; influxdb2.0.4-alpine.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker save anapsix/alpine-java:8_server-jre_unlimited &amp;gt; alpine-java8.tar
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;保留&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;镜像名、tag&lt;/li&gt;
+&lt;li&gt;所有构建历史（&lt;code&gt;docker history&lt;/code&gt; 能看到每一层）&lt;/li&gt;
+&lt;li&gt;标签 / env / 入口点等元数据&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 导入镜像&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker load &amp;lt; nginx1.19.9-alpine.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker load &amp;lt; mysql8.0.23.tar
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;注意&lt;/strong&gt;：&lt;code&gt;save&lt;/code&gt; 默认输出到 stdout（用 &lt;code&gt;&amp;gt;&lt;/code&gt; 重定向），&lt;code&gt;load&lt;/code&gt; 默认从 stdin 读取（用 &lt;code&gt;&amp;lt;&lt;/code&gt; 喂入）。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="三export--import容器快照"&gt;三、export / import：容器快照
+&lt;/h2&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 导出容器当前文件系统&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker &lt;span class="nb"&gt;export&lt;/span&gt; &amp;lt;container-id&amp;gt; &amp;gt; snapshot.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 实际例子&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker &lt;span class="nb"&gt;export&lt;/span&gt; 2acd22312bbe &amp;gt; tomcat80824.tar
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 从快照导入成新镜像（**默认无 tag**）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker import snapshot.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 命名（推荐）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker import snapshot.tar myimage:v1
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;丢弃&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;所有构建历史&lt;/strong&gt;——扁平化为单层&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;容器名 / 标签 / 启动参数&lt;/strong&gt;——只是个文件系统快照&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;环境变量 / 入口点&lt;/strong&gt;——可以 import 后用 &lt;code&gt;docker run&lt;/code&gt; 重新指定&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;典型场景&lt;/strong&gt;：容器 A 上有手动修改的文件（不写在 Dockerfile 里），想&amp;quot;原样&amp;quot;搬走。&lt;code&gt;export&lt;/code&gt; 拿到的就是 A 当前文件系统。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="四把运行中的容器打包成新镜像"&gt;四、把运行中的容器打包成新镜像
+&lt;/h2&gt;&lt;p&gt;需求：服务器 A 上一个容器跑得好好的，有大量数据 + 手工修改，&lt;strong&gt;直接迁移到 B 上&lt;/strong&gt;。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 1. 在 A 上：把容器 commit 成新镜像&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker commit &amp;lt;container-id&amp;gt; &amp;lt;new-image-name&amp;gt;:&amp;lt;tag&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 实际例子&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker commit 135a0d19f757 jenkins:1.0
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 2. 镜像存到 tar&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker save jenkins:1.0 &amp;gt; jenkins1.0.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 3. 拷到 B（scp / u盘 / 内网）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;scp jenkins1.0.tar root@&amp;lt;B-host&amp;gt;:/tmp/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 4. 在 B 上：加载镜像&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker load &amp;lt; /tmp/jenkins1.0.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 5. 在 B 上：用同样的参数启动&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -d --name jenkins jenkins:1.0
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;Why 用 &lt;code&gt;commit&lt;/code&gt; 而不是 &lt;code&gt;export&lt;/code&gt;&lt;/strong&gt;：&lt;code&gt;commit&lt;/code&gt; 把容器&lt;strong&gt;当前的差异化层&lt;/strong&gt;（基于原镜像的修改）保留下来，&lt;strong&gt;新镜像的&amp;quot;基础层&amp;quot;还是原镜像&lt;/strong&gt;——体积小、有历史、&lt;code&gt;FROM&lt;/code&gt; 关系清晰。&lt;code&gt;export&lt;/code&gt; 是纯文件系统，体积大且无继承。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="五批量备份所有镜像"&gt;五、批量备份所有镜像
+&lt;/h2&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;span class="lnt"&gt;9
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 备份所有镜像到一个目录&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;mkdir -p /backup/docker-images
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;for&lt;/span&gt; IMAGE in &lt;span class="k"&gt;$(&lt;/span&gt;docker images --format &lt;span class="s1"&gt;&amp;#39;{{.Repository}}:{{.Tag}}&amp;#39;&lt;/span&gt; &lt;span class="p"&gt;|&lt;/span&gt; grep -v &lt;span class="s1"&gt;&amp;#39;&amp;lt;none&amp;gt;&amp;#39;&lt;/span&gt;&lt;span class="k"&gt;)&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nv"&gt;SAFE_NAME&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="k"&gt;$(&lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="nv"&gt;$IMAGE&lt;/span&gt; &lt;span class="p"&gt;|&lt;/span&gt; tr &lt;span class="s1"&gt;&amp;#39;/:&amp;#39;&lt;/span&gt; &lt;span class="s1"&gt;&amp;#39;_&amp;#39;&lt;/span&gt;&lt;span class="k"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; docker save &lt;span class="nv"&gt;$IMAGE&lt;/span&gt; &amp;gt; /backup/docker-images/&lt;span class="si"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;SAFE_NAME&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;done&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 验证&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;ls -lh /backup/docker-images/
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="六常见问题"&gt;六、常见问题
+&lt;/h2&gt;&lt;h3 id="61-docker-load-之后镜像名变长-hash"&gt;6.1 &lt;code&gt;docker load&lt;/code&gt; 之后镜像名变长 hash
+&lt;/h3&gt;&lt;p&gt;&lt;code&gt;save&lt;/code&gt; 没指定镜像名时，&lt;strong&gt;&lt;code&gt;load&lt;/code&gt; 后镜像名是 hash&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker load &amp;lt; nginx.tar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;Loaded image ID: sha256:7d0a4dc9b...
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;$ docker images
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;REPOSITORY TAG IMAGE ID CREATED SIZE
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&amp;lt;none&amp;gt; &amp;lt;none&amp;gt; 7d0a4dc9b... &lt;span class="m"&gt;2&lt;/span&gt; weeks ago 187MB
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;解决：手动 tag。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker tag 7d0a4dc9b... nginx:1.19.9-alpine
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="62-跨大版本-docker-不兼容"&gt;6.2 跨大版本 Docker 不兼容
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;&lt;code&gt;docker save&lt;/code&gt; 产物在跨大版本 Docker 之间可能不能 &lt;code&gt;load&lt;/code&gt;&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Docker 1.10+ 改了镜像 schema，&lt;strong&gt;老 daemon 可能不认新镜像&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;新 daemon 一般能 load 老镜像（向后兼容）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;如果跨大版本不兼容：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 在老 daemon 上导出&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker save -o old.tar image:tag
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 在新 daemon 上导入&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker load -i old.tar
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;如果还不行，&lt;strong&gt;升级老 daemon&lt;/strong&gt; 或用 &lt;code&gt;docker pull&lt;/code&gt; + 私有 registry 中转。&lt;/p&gt;
+&lt;h3 id="63-save-文件很大传输慢"&gt;6.3 &lt;code&gt;save&lt;/code&gt; 文件很大，传输慢
+&lt;/h3&gt;&lt;p&gt;镜像层是去重的，&lt;strong&gt;多个镜像可以合并成一个 save 文件&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker save -o multi.tar nginx:1.19 mysql:8.0 redis:6.0
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;code&gt;load&lt;/code&gt; 后&lt;strong&gt;所有镜像都会出现&lt;/strong&gt;。&lt;/p&gt;
+&lt;h2 id="七save--export-的取舍速查"&gt;七、save / export 的取舍速查
+&lt;/h2&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;场景&lt;/th&gt;
+					&lt;th&gt;推荐&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;离线环境装镜像&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;save&lt;/code&gt; / &lt;code&gt;load&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;容器整体迁移到另一台机器&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;commit&lt;/code&gt; + &lt;code&gt;save&lt;/code&gt; + &lt;code&gt;load&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;容器当前状态备份&lt;/strong&gt;（含手工修改）&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;export&lt;/code&gt; / &lt;code&gt;import&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;镜像要保留构建历史&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;save&lt;/code&gt; / &lt;code&gt;load&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;大镜像分发&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;私有 registry + &lt;code&gt;docker push&lt;/code&gt; / &lt;code&gt;pull&lt;/code&gt;（更高效）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;跨大版本 Docker&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;升级老 daemon 或走 registry 中转&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="八生产最佳实践"&gt;八、生产最佳实践
+&lt;/h2&gt;&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;优先用私有 registry&lt;/strong&gt;——&lt;code&gt;docker push&lt;/code&gt; / &lt;code&gt;pull&lt;/code&gt; 内部仓库比 &lt;code&gt;save&lt;/code&gt; / &lt;code&gt;load&lt;/code&gt; 更快、支持增量、可以做权限控制&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;save&lt;/code&gt; 文件&lt;/strong&gt;作为离线备份、应急恢复用——&lt;strong&gt;不要&lt;/strong&gt;作为日常分发方式&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;写 Dockerfile + rebuild&lt;/strong&gt;——比 commit 容器更可追溯、更可复现&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;CI 流水线&lt;/strong&gt;用 commit / tag 标识版本，避免&amp;quot;无 tag 镜像&amp;quot;堆积&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="九要点回顾"&gt;九、要点回顾
+&lt;/h2&gt;&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;save&lt;/code&gt; / &lt;code&gt;load&lt;/code&gt; 保留历史&lt;/strong&gt;，&lt;code&gt;export&lt;/code&gt; / &lt;code&gt;import&lt;/code&gt; 扁平化&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;commit + save + load&lt;/strong&gt; 是&amp;quot;运行中容器迁移&amp;quot;的标准三件套&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;跨大版本 Docker&lt;/strong&gt; &lt;code&gt;save&lt;/code&gt; / &lt;code&gt;load&lt;/code&gt; 可能不兼容——优先升级 daemon&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;多镜像可以合并&lt;/strong&gt;到一个 &lt;code&gt;save&lt;/code&gt; 文件（&lt;code&gt;-o&lt;/code&gt; flag）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;load&lt;/code&gt; 后无 tag&lt;/strong&gt; 要手动 &lt;code&gt;docker tag&lt;/code&gt; 命名&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="十小结"&gt;十、小结
+&lt;/h2&gt;&lt;p&gt;把镜像 / 容器的导入导出搞清楚，&lt;strong&gt;离线环境、内部 Harbor / Registry 没起来的应急场景&lt;/strong&gt;都能 hold 住。但生产环境&lt;strong&gt;强烈建议走私有 registry&lt;/strong&gt;——&lt;code&gt;save&lt;/code&gt; / &lt;code&gt;load&lt;/code&gt; 是&amp;quot;应急&amp;quot;工具，不是&amp;quot;日常&amp;quot;工具。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;下一步&lt;/strong&gt;：理解了单镜像的导入导出，下一步是 Harbor / Docker Registry / Distribution 私有仓库的搭建、镜像签名、漏洞扫描——&lt;code&gt;save&lt;/code&gt; / &lt;code&gt;load&lt;/code&gt; 解决&amp;quot;单文件&amp;quot;问题，registry 解决&amp;quot;仓库级&amp;quot;问题。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="参考资料"&gt;参考资料
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;a class="link" href="https://docs.docker.com/engine/reference/commandline/save/" target="_blank" rel="noopener"
+ &gt;Docker save 官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://docs.docker.com/engine/reference/commandline/load/" target="_blank" rel="noopener"
+ &gt;Docker load 官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://docs.docker.com/engine/reference/commandline/export/" target="_blank" rel="noopener"
+ &gt;Docker export 官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://docs.docker.com/engine/reference/commandline/import/" target="_blank" rel="noopener"
+ &gt;Docker import 官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://docs.docker.com/engine/reference/commandline/commit/" target="_blank" rel="noopener"
+ &gt;Docker commit 官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>

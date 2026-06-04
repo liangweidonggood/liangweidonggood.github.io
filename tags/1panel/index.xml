@@ -1,0 +1,426 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>1Panel on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/1panel/</link><description>Recent content in 1Panel on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Mon, 15 Dec 2014 00:00:00 +0800</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/1panel/index.xml" rel="self" type="application/rss+xml"/><item><title>宝塔与 1Panel：两款 Linux 服务器管理面板的 Docker 部署实战</title><link>https://liangweidonggood.github.io/p/bao-ta-yu-1panel/</link><pubDate>Mon, 15 Dec 2014 00:00:00 +0800</pubDate><guid>https://liangweidonggood.github.io/p/bao-ta-yu-1panel/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/bao-ta-yu-1panel/image/cover.jpg" alt="Featured image of post 宝塔与 1Panel：两款 Linux 服务器管理面板的 Docker 部署实战" /&gt;&lt;p&gt;Linux 服务器的&amp;quot;装系统、装环境、装服务&amp;quot;过去全靠命令行——装一个 Nginx 要写一长串 apt / yum 指令，配置 SSL 还要碰 openssl 的细节，对刚入门的人来说门槛不低。&amp;ldquo;服务器管理面板&amp;quot;就是为了把这套流程做成 Web 化、可视化的产品：宝塔、1Panel、AppNode、URLOS、aaPanel 都是这一脉的代表。这篇文章聚焦两款最常见的产品——&lt;strong&gt;宝塔（pch18/baota）&lt;/strong&gt; 和 &lt;strong&gt;moelin/1Panel&lt;/strong&gt;——把它们的 Docker 部署、目录映射、默认凭据和排错一次性说清楚。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;阅读对象&lt;/strong&gt;：刚接触 Linux、想把日常运维（站点、数据库、SSL、计划任务）从命令行解放出来的同学；以及需要在容器里跑管理面板的 CI/CD / 演示环境搭建者。
+&lt;strong&gt;覆盖范围&lt;/strong&gt;：宝塔（CentOS/Debian 一键脚本 + pch18/baota 镜像）的安装与目录映射；1Panel 的 docker run / docker-compose 启动、目录约定、默认账户与首次进入。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="一为什么需要服务器管理面板"&gt;一、为什么需要&amp;quot;服务器管理面板&amp;rdquo;
+&lt;/h2&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;痛点&lt;/th&gt;
+					&lt;th&gt;命令行解法&lt;/th&gt;
+					&lt;th&gt;面板解法&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;装 Nginx/PHP/MySQL/Redis 一套 LNMP&lt;/td&gt;
+					&lt;td&gt;多个 &lt;code&gt;apt install&lt;/code&gt; + 手动改配置&lt;/td&gt;
+					&lt;td&gt;选 LNP/MPN 模板，一键安装&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;给站点申请/部署 SSL 证书&lt;/td&gt;
+					&lt;td&gt;手写 &lt;code&gt;acme.sh&lt;/code&gt; cron + nginx 站点配置&lt;/td&gt;
+					&lt;td&gt;域名 → 申请 → 自动续期&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;看磁盘/CPU/网络&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;df -h&lt;/code&gt; / &lt;code&gt;top&lt;/code&gt; / &lt;code&gt;vmstat&lt;/code&gt; 拼图&lt;/td&gt;
+					&lt;td&gt;仪表盘一屏看完&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;多用户/多站点权限隔离&lt;/td&gt;
+					&lt;td&gt;nginx vhost + sudo 配置&lt;/td&gt;
+					&lt;td&gt;图形化&amp;quot;网站 → 权限&amp;quot;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;容器化部署&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;docker run&lt;/code&gt; / &lt;code&gt;docker compose&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;&amp;ldquo;应用商店&amp;rdquo; 里点一下&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;When to use&lt;/strong&gt;：单台/几台机器、想快速搞起一套 Web 环境、不想折腾配置时；或团队需要让非运维同学也能上手时。Kubernetes 集群级别仍然不靠面板，而是 Helm + GitOps。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;hr&gt;
+&lt;h2 id="二宝塔面板pch18baota"&gt;二、宝塔面板（pch18/baota）
+&lt;/h2&gt;&lt;p&gt;宝塔是国产老牌面板，最早（2014 年）发布的是一键安装脚本，覆盖 CentOS/Debian/Ubuntu。后来社区出了 &lt;code&gt;pch18/baota&lt;/code&gt; 镜像，让它可以跑在 Docker 里——非常适合演示、CI、临时环境。&lt;/p&gt;
+&lt;h3 id="21-原生安装一键脚本"&gt;2.1 原生安装（一键脚本）
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# CentOS&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;yum install -y wget &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; wget -O install.sh https://download.bt.cn/install/install_6.0.sh &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; sh install.sh ed8484bec
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# Debian / Ubuntu&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;wget -O install.sh https://download.bt.cn/install/install-ubuntu_6.0.sh &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; sudo bash install.sh ed8484bec
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;安装完后会输出管理地址（通常是 &lt;code&gt;http://&amp;lt;IP&amp;gt;:8888/&amp;lt;随机入口&amp;gt;&lt;/code&gt;）和默认账号。&lt;/p&gt;
+&lt;h3 id="22-docker-部署-pch18baota"&gt;2.2 Docker 部署 pch18/baota
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;核心思路&lt;/strong&gt;：把 &lt;code&gt;/www&lt;/code&gt; 目录从容器里拷出来挂到宿主机，这样重启/升级容器不会丢数据。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 第一次启动（host 网络，端口全开）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -tid --name baota --restart always &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -p 8002:80 -p 8043:443 -p 8808:8888 -p 808:888 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --privileged&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nb"&gt;true&lt;/span&gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --shm-size&lt;span class="o"&gt;=&lt;/span&gt;1g &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; pch18/baota:latest
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 把容器里的 /www 拷出来&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker cp baota:/www /home/docker/baota
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 关掉临时容器&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker rm -f baota
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;接下来用持久化的方式重新启动（推荐）：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;span class="lnt"&gt;18
+&lt;/span&gt;&lt;span class="lnt"&gt;19
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;mkdir -p /home/docker/baota/www/wwwroot
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# host 网络（推荐：避免端口转发的性能损失）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -tid --name baota --restart always &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --net&lt;span class="o"&gt;=&lt;/span&gt;host &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --privileged&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nb"&gt;true&lt;/span&gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --shm-size&lt;span class="o"&gt;=&lt;/span&gt;1g &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /home/docker/baota/www:/www &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /home/docker/baota/www/wwwroot:/www/wwwroot &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; pch18/baota:latest
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# bridge 网络（如需端口隔离）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -tid --name baota --restart always &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -p 8002:80 -p 8043:443 -p 8808:8888 -p 808:888 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --privileged&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nb"&gt;true&lt;/span&gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --shm-size&lt;span class="o"&gt;=&lt;/span&gt;1g &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /home/docker/baota/www:/www &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /home/docker/baota/www/wwwroot:/www/wwwroot &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; pch18/baota:latest
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;&lt;strong&gt;端口说明&lt;/strong&gt;：&lt;code&gt;80:80&lt;/code&gt;（HTTP）、&lt;code&gt;443:443&lt;/code&gt;（HTTPS）、&lt;code&gt;8888:8888&lt;/code&gt;（面板）、&lt;code&gt;888&lt;/code&gt;（phpMyAdmin）。&lt;code&gt;--shm-size=1g&lt;/code&gt; 给 PHP 足够的共享内存，&lt;code&gt;--privileged=true&lt;/code&gt; 让面板能在容器里调 systemd / mount 等特权操作。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;p&gt;&lt;strong&gt;访问入口&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-fallback" data-lang="fallback"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;http://&amp;lt;宿主机IP&amp;gt;:8808/login
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;默认账号 &lt;code&gt;username/password&lt;/code&gt; 会在控制台输出，登录后必须改密码。&lt;/p&gt;
+&lt;h3 id="23-进入容器操作"&gt;2.3 进入容器操作
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;span class="lnt"&gt;18
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker logs -f --tail&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="m"&gt;100&lt;/span&gt; baota
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker &lt;span class="nb"&gt;exec&lt;/span&gt; -it baota bash
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 容器内的命令行&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;[&lt;/span&gt;root@&amp;lt;container&amp;gt; wwwroot&lt;span class="o"&gt;]&lt;/span&gt;&lt;span class="c1"&gt;# bt&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;===============&lt;/span&gt;&lt;span class="nv"&gt;宝塔面板命令行&lt;/span&gt;&lt;span class="o"&gt;==================&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;1&lt;span class="o"&gt;)&lt;/span&gt; 重启面板服务 &lt;span class="o"&gt;(&lt;/span&gt;8&lt;span class="o"&gt;)&lt;/span&gt; 改面板端口
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;2&lt;span class="o"&gt;)&lt;/span&gt; 停止面板服务 &lt;span class="o"&gt;(&lt;/span&gt;9&lt;span class="o"&gt;)&lt;/span&gt; 清除面板缓存
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;3&lt;span class="o"&gt;)&lt;/span&gt; 启动面板服务 &lt;span class="o"&gt;(&lt;/span&gt;10&lt;span class="o"&gt;)&lt;/span&gt; 清除登录限制
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;4&lt;span class="o"&gt;)&lt;/span&gt; 重载面板服务 &lt;span class="o"&gt;(&lt;/span&gt;11&lt;span class="o"&gt;)&lt;/span&gt; 取消入口限制
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;5&lt;span class="o"&gt;)&lt;/span&gt; 修改面板密码 &lt;span class="o"&gt;(&lt;/span&gt;12&lt;span class="o"&gt;)&lt;/span&gt; 取消域名绑定限制
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;6&lt;span class="o"&gt;)&lt;/span&gt; 修改面板用户名 &lt;span class="o"&gt;(&lt;/span&gt;13&lt;span class="o"&gt;)&lt;/span&gt; 取消IP访问限制
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;7&lt;span class="o"&gt;)&lt;/span&gt; 强制修改MySQL密码 &lt;span class="o"&gt;(&lt;/span&gt;14&lt;span class="o"&gt;)&lt;/span&gt; 查看面板默认信息
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;22&lt;span class="o"&gt;)&lt;/span&gt; 显示面板错误日志 &lt;span class="o"&gt;(&lt;/span&gt;15&lt;span class="o"&gt;)&lt;/span&gt; 清理系统垃圾
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;23&lt;span class="o"&gt;)&lt;/span&gt; 关闭BasicAuth认证 &lt;span class="o"&gt;(&lt;/span&gt;16&lt;span class="o"&gt;)&lt;/span&gt; 修复面板
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;24&lt;span class="o"&gt;)&lt;/span&gt; 关闭谷歌认证 &lt;span class="o"&gt;(&lt;/span&gt;17&lt;span class="o"&gt;)&lt;/span&gt; 设置日志切割是否压缩
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;25&lt;span class="o"&gt;)&lt;/span&gt; 设置是否保存文件历史副本 &lt;span class="o"&gt;(&lt;/span&gt;18&lt;span class="o"&gt;)&lt;/span&gt; 设置是否自动备份面板
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="o"&gt;(&lt;/span&gt;0&lt;span class="o"&gt;)&lt;/span&gt; 取消
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="24-常见问题"&gt;2.4 常见问题
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;Q1：&lt;code&gt;lsattr: Operation not supported While reading flags on python&lt;/code&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;容器化宝塔有时会触发这个错误（共享卷的属性查询在内核层不支持）。解决：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;rm -rf /www/server/panel/pyenv
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;curl http://download.bt.cn/install/update_panel.sh &lt;span class="p"&gt;|&lt;/span&gt; bash
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;strong&gt;Q2：&lt;code&gt;Error: BT-Panel service startup failed.&lt;/code&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;通常是端口被占用或权限问题。重新跑一次安装脚本即可。&lt;/p&gt;
+&lt;hr&gt;
+&lt;h2 id="三1panelmoelin1panel"&gt;三、1Panel（moelin/1Panel）
+&lt;/h2&gt;&lt;p&gt;1Panel 是 2022 年开源的新一代面板（飞致云出品），定位&amp;quot;现代化、开源、安全&amp;quot;，界面更现代，自带&amp;quot;应用商店&amp;quot;。Docker 化的 &lt;code&gt;moelin/1Panel&lt;/code&gt; 镜像让体验完整保留。&lt;/p&gt;
+&lt;h3 id="31-docker-run-启动"&gt;3.1 docker run 启动
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker run -d &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --name 1panel &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; --restart always &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -p 10087:10086 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /var/run/docker.sock:/var/run/docker.sock &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /var/lib/docker/volumes:/var/lib/docker/volumes &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /opt:/opt &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /root:/root &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -v /data:/data &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -e &lt;span class="nv"&gt;TZ&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;Asia/Shanghai &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; moelin/1panel:latest
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="32-docker-compose-启动"&gt;3.2 docker-compose 启动
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-yaml" data-lang="yaml"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;version&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;3&amp;#34;&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;services&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;1panel&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;container_name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;1panel&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;restart&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;always&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;network_mode&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;host&amp;#34;&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;volumes&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;- &lt;span class="l"&gt;/var/run/docker.sock:/var/run/docker.sock&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;- &lt;span class="l"&gt;/var/lib/docker/volumes:/var/lib/docker/volumes&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;- &lt;span class="l"&gt;/opt:/opt&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;- &lt;span class="l"&gt;/root:/root&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;environment&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;- &lt;span class="l"&gt;TZ=Asia/Shanghai&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;image&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;moelin/1panel:latest&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;labels&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;createdBy&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;Apps&amp;#34;&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="33-首次进入"&gt;3.3 首次进入
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;docker &lt;span class="nb"&gt;exec&lt;/span&gt; -it 1panel bash
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;root@&amp;lt;host&amp;gt;:/$ 1pctl user-info
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;面板地址: http://&lt;span class="nv"&gt;$LOCAL_IP&lt;/span&gt;:10086/entrance
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;面板用户: 1panel
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;面板密码: &amp;lt;随机生成&amp;gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;提示：修改密码可执行命令：1pctl update password
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;访问 &lt;code&gt;http://&amp;lt;宿主机IP&amp;gt;:10086/entrance&lt;/code&gt;（不是 10087，是容器内 10086 端口暴露给宿主的入口）。&lt;/p&gt;
+&lt;h3 id="34-关键约定"&gt;3.4 关键约定
+&lt;/h3&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;项&lt;/th&gt;
+					&lt;th&gt;值&lt;/th&gt;
+					&lt;th&gt;备注&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;默认端口&lt;/td&gt;
+					&lt;td&gt;10086&lt;/td&gt;
+					&lt;td&gt;通过 &lt;code&gt;-p 10087:10086&lt;/code&gt; 映射&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;默认账号&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;1panel&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;默认密码&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;1panel_password&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;第一次安装随机生成&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;默认入口&lt;/td&gt;
+					&lt;td&gt;&lt;code&gt;entrance&lt;/code&gt;&lt;/td&gt;
+					&lt;td&gt;即 URL 末尾的 &lt;code&gt;entrance&lt;/code&gt;&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3 id="35-注意事项"&gt;3.5 注意事项
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;容器化部署的 1Panel 升级&lt;/strong&gt;：不要点 UI 里的&amp;quot;立即更新&amp;quot;，&lt;strong&gt;应该拉新镜像 → 删除旧容器 → 用同样的目录映射重新部署&lt;/strong&gt;。容器内 systemd 不完整，UI 升级路径会卡住。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;不可调整的挂载&lt;/strong&gt;：&lt;code&gt;/var/run/docker.sock&lt;/code&gt;（必须挂，否则 1Panel 不能管理宿主机上的容器）。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;可调整的挂载&lt;/strong&gt;：&lt;code&gt;/opt&lt;/code&gt;（应用数据）、&lt;code&gt;/root&lt;/code&gt;（可选）、&lt;code&gt;/var/lib/docker/volumes&lt;/code&gt;（Docker 卷）、&lt;code&gt;TZ=Asia/Shanghai&lt;/code&gt;（时区）。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;systemd 限制&lt;/strong&gt;：因为容器内 systemd 不完整，部分面板功能（开机自启、服务守护）可能表现异常，复杂场景仍建议在裸机上跑 1Panel。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;h2 id="四宝塔-vs-1panel怎么选"&gt;四、宝塔 vs 1Panel：怎么选
+&lt;/h2&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;维度&lt;/th&gt;
+					&lt;th&gt;宝塔&lt;/th&gt;
+					&lt;th&gt;1Panel&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;起源&lt;/td&gt;
+					&lt;td&gt;2014 国产老牌&lt;/td&gt;
+					&lt;td&gt;2022 飞致云开源&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;资源占用&lt;/td&gt;
+					&lt;td&gt;较低（约 200MB）&lt;/td&gt;
+					&lt;td&gt;较高（Go 后端 + 前端）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;Docker 支持&lt;/td&gt;
+					&lt;td&gt;较弱（&amp;ldquo;Docker 容器&amp;quot;模块粗糙）&lt;/td&gt;
+					&lt;td&gt;原生设计（&amp;ldquo;应用商店&amp;quot;直接装 WordPress / Halo / Halo 2）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;应用商店&lt;/td&gt;
+					&lt;td&gt;第三方脚本合集&lt;/td&gt;
+					&lt;td&gt;内置官方市场（MySQL、Redis、Nginx、PHP 一键装）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;主机防火墙&lt;/td&gt;
+					&lt;td&gt;无图形化（要装 iptables 插件）&lt;/td&gt;
+					&lt;td&gt;内置&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;Web 终端&lt;/td&gt;
+					&lt;td&gt;宝塔 SSH 终端&lt;/td&gt;
+					&lt;td&gt;内置&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;HTTPS 证书&lt;/td&gt;
+					&lt;td&gt;一键申请 + 自动续期&lt;/td&gt;
+					&lt;td&gt;一键申请 + 自动续期&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;备份&lt;/td&gt;
+					&lt;td&gt;面板级 + 站点级&lt;/td&gt;
+					&lt;td&gt;面板级 + 计划任务 cron&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;适合&lt;/td&gt;
+					&lt;td&gt;老项目、LAMP/LNMP 站群、内存小的机器&lt;/td&gt;
+					&lt;td&gt;新项目、容器化部署、想要现代 UI&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;strong&gt;经验法则&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;内存 ≥ 4GB + 想&amp;quot;装 WordPress / 各类应用&amp;rdquo; → 1Panel&lt;/li&gt;
+&lt;li&gt;内存 ≤ 2GB + 老项目维护 + 习惯原生命令 → 宝塔&lt;/li&gt;
+&lt;li&gt;临时演示 / CI 环境 → pch18/baota 镜像（不用装扩展）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;h2 id="五扩展阅读"&gt;五、扩展阅读
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;宝塔官方：&lt;a class="link" href="https://www.bt.cn/" target="_blank" rel="noopener"
+ &gt;bt.cn&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;1Panel 官方：&lt;a class="link" href="https://1panel.cn/" target="_blank" rel="noopener"
+ &gt;1panel.cn&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;pch18/baota 镜像：&lt;a class="link" href="https://hub.docker.com/r/pch18/baota" target="_blank" rel="noopener"
+ &gt;hub.docker.com/r/pch18/baota&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;moelin/1panel 镜像：&lt;a class="link" href="https://hub.docker.com/r/moelin/1panel" target="_blank" rel="noopener"
+ &gt;hub.docker.com/r/moelin/1panel&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>
