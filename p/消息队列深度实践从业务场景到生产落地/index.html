@@ -1,0 +1,1273 @@
+<!doctype html><html lang=zh-cn dir=ltr><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=description content="消息队列深度实践 章节 1:引子 —— 从一次接口超时事故说起 2024 年 6 月某个周二下午 14:23,监控告警群里突然炸开了锅:项目服务(project-service)的 P99 延迟从 180ms 飙升到 7,400ms,紧接着触发了下游 6 个微服务的雪崩超时。我拉了一下调用链详情,从前端创建订单入口到落库成功一共 6 跳:网关 → 用户中心 → 项目服务 → 任务服务 → 文档服务 → 消息服务 → 计费服务。前 4 跳加起来不超过 200ms,但消息服务和计费服务各贡献了 3,500ms,串行等待了 6.9 秒才返回。整个下单链路卡成了 PPT,业务方在群里连发了 17 条消息。\n"><title>消息队列深度实践:从业务场景到生产落地</title><link rel=canonical href=https://liangweidonggood.github.io/p/%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E6%B7%B1%E5%BA%A6%E5%AE%9E%E8%B7%B5%E4%BB%8E%E4%B8%9A%E5%8A%A1%E5%9C%BA%E6%99%AF%E5%88%B0%E7%94%9F%E4%BA%A7%E8%90%BD%E5%9C%B0/><link rel=preconnect href=https://fonts.googleapis.com><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link rel=preload as=style href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap"><link rel=stylesheet href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap"><link rel=stylesheet href=/scss/style.min.9162cf36dffeae0a08a32c13b9926f911e460492dac4ee4ecdcf9434e1f3202b.css><meta property='og:title' content="消息队列深度实践:从业务场景到生产落地"><meta property='og:description' content="消息队列深度实践 章节 1:引子 —— 从一次接口超时事故说起 2024 年 6 月某个周二下午 14:23,监控告警群里突然炸开了锅:项目服务(project-service)的 P99 延迟从 180ms 飙升到 7,400ms,紧接着触发了下游 6 个微服务的雪崩超时。我拉了一下调用链详情,从前端创建订单入口到落库成功一共 6 跳:网关 → 用户中心 → 项目服务 → 任务服务 → 文档服务 → 消息服务 → 计费服务。前 4 跳加起来不超过 200ms,但消息服务和计费服务各贡献了 3,500ms,串行等待了 6.9 秒才返回。整个下单链路卡成了 PPT,业务方在群里连发了 17 条消息。\n"><meta property='og:url' content='https://liangweidonggood.github.io/p/%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E6%B7%B1%E5%BA%A6%E5%AE%9E%E8%B7%B5%E4%BB%8E%E4%B8%9A%E5%8A%A1%E5%9C%BA%E6%99%AF%E5%88%B0%E7%94%9F%E4%BA%A7%E8%90%BD%E5%9C%B0/'><meta property='og:site_name' content="Liangweidong's blog"><meta property='og:type' content='article'><meta property='article:section' content='Post'><meta property='article:tag' content='消息队列'><meta property='article:tag' content='RocketMQ'><meta property='article:tag' content='RabbitMQ'><meta property='article:tag' content='EMQX'><meta property='article:tag' content='Spring Cloud Stream'><meta property='article:tag' content='K8s部署'><meta property='article:published_time' content='2026-06-06T00:00:00+08:00'><meta property='article:modified_time' content='2026-06-06T00:00:00+08:00'><meta property='og:image' content='https://liangweidonggood.github.io/p/%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E6%B7%B1%E5%BA%A6%E5%AE%9E%E8%B7%B5%E4%BB%8E%E4%B8%9A%E5%8A%A1%E5%9C%BA%E6%99%AF%E5%88%B0%E7%94%9F%E4%BA%A7%E8%90%BD%E5%9C%B0/image/cover.jpg'><meta name=twitter:title content="消息队列深度实践:从业务场景到生产落地"><meta name=twitter:description content="消息队列深度实践 章节 1:引子 —— 从一次接口超时事故说起 2024 年 6 月某个周二下午 14:23,监控告警群里突然炸开了锅:项目服务(project-service)的 P99 延迟从 180ms 飙升到 7,400ms,紧接着触发了下游 6 个微服务的雪崩超时。我拉了一下调用链详情,从前端创建订单入口到落库成功一共 6 跳:网关 → 用户中心 → 项目服务 → 任务服务 → 文档服务 → 消息服务 → 计费服务。前 4 跳加起来不超过 200ms,但消息服务和计费服务各贡献了 3,500ms,串行等待了 6.9 秒才返回。整个下单链路卡成了 PPT,业务方在群里连发了 17 条消息。\n"><meta name=twitter:card content="summary_large_image"><meta name=twitter:image content='https://liangweidonggood.github.io/p/%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E6%B7%B1%E5%BA%A6%E5%AE%9E%E8%B7%B5%E4%BB%8E%E4%B8%9A%E5%8A%A1%E5%9C%BA%E6%99%AF%E5%88%B0%E7%94%9F%E4%BA%A7%E8%90%BD%E5%9C%B0/image/cover.jpg'><link rel="shortcut icon" href=/img/favicon.png></head><body class=article-page><script>(function(){const e="StackColorScheme";localStorage.getItem(e)||localStorage.setItem(e,"auto")})()</script><script>(function(){const t="StackColorScheme",e=localStorage.getItem(t),n=window.matchMedia("(prefers-color-scheme: dark)").matches===!0;e=="dark"||e==="auto"&&n?document.documentElement.dataset.scheme="dark":document.documentElement.dataset.scheme="light"})()</script><div class="container main-container flex on-phone--column extended"><aside class="sidebar left-sidebar sticky"><button class="hamburger hamburger--spin" type=button id=toggle-menu aria-label=切换菜单>
+<span class=hamburger-box><span class=hamburger-inner></span></span></button><header><figure class=site-avatar><a href=/><img src=/img/avatar.png width=144 height=144 class=site-logo loading=lazy alt=Avatar>
+</a><span class=emoji>🍥</span></figure><div class=site-meta><h1 class=site-name><a href=/>Liangweidong's blog</a></h1><h2 class=site-description>以技术立身，以温柔生活</h2></div></header><ol class=menu-social><li><a href=https://github.com/liangweidonggood title=GitHub rel=me><svg class="icon icon-tabler icon-tabler-brand-github" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6.0 00-1.3-3.2 4.2 4.2.0 00-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3.0 00-6.2.0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2.0 00-.1 3.2A4.6 4.6.0 004 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/></svg></a></li></ol><ol class=menu id=main-menu><li><a href=/><svg class="icon icon-tabler icon-tabler-home" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><polyline points="5 12 3 12 12 3 21 12 19 12"/><path d="M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7"/><path d="M9 21v-6a2 2 0 012-2h2a2 2 0 012 2v6"/></svg>
+<span>主页</span></a></li><li><a href=/archives/><svg class="icon icon-tabler icon-tabler-archive" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><rect x="3" y="4" width="18" height="4" rx="2"/><path d="M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+<span>归档</span></a></li><li><a href=/search/><svg class="icon icon-tabler icon-tabler-search" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="10" cy="10" r="7"/><line x1="21" y1="21" x2="15" y2="15"/></svg>
+<span>搜索</span></a></li><li><a href=/%E9%93%BE%E6%8E%A5/><svg class="icon icon-tabler icon-tabler-link" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><path d="M10 14a3.5 3.5.0 005 0l4-4a3.5 3.5.0 00-5-5l-.5.5"/><path d="M14 10a3.5 3.5.0 00-5 0l-4 4a3.5 3.5.0 005 5l.5-.5"/></svg>
+<span>链接</span></a></li><li class=menu-bottom-section><ol class=menu><li id=dark-mode-toggle><svg class="icon icon-tabler icon-tabler-toggle-left" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="8" cy="12" r="2"/><rect x="2" y="6" width="20" height="12" rx="6"/></svg>
+<svg class="icon icon-tabler icon-tabler-toggle-right" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="16" cy="12" r="2"/><rect x="2" y="6" width="20" height="12" rx="6"/></svg>
+<span>暗色模式</span></li></ol></li></ol></aside><aside class="sidebar right-sidebar sticky"><section class="widget tagCloud"><div class=widget-icon><svg class="icon icon-tabler icon-tabler-hash" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><line x1="5" y1="9" x2="19" y2="9"/><line x1="5" y1="15" x2="19" y2="15"/><line x1="11" y1="4" x2="7" y2="20"/><line x1="17" y1="4" x2="13" y2="20"/></svg></div><h2 class="widget-title section-title"><a href=/categories/>分类</a></h2><div class=tagCloud-tags><a href=/categories/%E7%B3%BB%E7%BB%9F%E6%9E%B6%E6%9E%84/>系统架构
+</a><a href=/categories/%E7%BC%96%E7%A8%8B/>编程
+</a><a href=/categories/%E6%93%8D%E4%BD%9C%E7%B3%BB%E7%BB%9F/>操作系统
+</a><a href=/categories/%E5%B7%A5%E5%85%B7/>工具
+</a><a href=/categories/%E4%B8%AA%E4%BA%BA%E9%9A%8F%E7%AC%94/>个人随笔
+</a><a href=/categories/%E8%B5%84%E8%AE%AF/>资讯
+</a><a href=/categories/%E7%AE%97%E6%B3%95/>算法
+</a><a href=/categories/%E7%BD%91%E7%BB%9C/>网络</a></div></section><section class="widget archives"><div class=widget-icon><svg class="icon icon-tabler icon-tabler-hash" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><line x1="5" y1="9" x2="19" y2="9"/><line x1="5" y1="15" x2="19" y2="15"/><line x1="11" y1="4" x2="7" y2="20"/><line x1="17" y1="4" x2="13" y2="20"/></svg></div><h2 class="widget-title section-title">目录</h2><div class=widget--toc><nav class=toc-nav id=TableOfContents><ol><li><a href=#章节-1引子--从一次接口超时事故说起>章节 1:引子 —— 从一次接口超时事故说起</a></li><li><a href=#章节-2业务场景与三大核心价值>章节 2:业务场景与三大核心价值</a><ol><li><a href=#21-解耦三方协作的看不见的手>2.1 解耦:三方协作的"看不见的手"</a></li><li><a href=#22-异步让主链路轻装上阵>2.2 异步:让主链路轻装上阵</a></li><li><a href=#23-削峰用-8000-万日吞吐接住-5-万-qps-秒杀>2.3 削峰:用 8000 万日吞吐接住 5 万 QPS 秒杀</a></li></ol></li><li><a href=#章节-3选型对比--rocketmq-vs-rabbitmq-vs-emqx>章节 3:选型对比 —— RocketMQ vs RabbitMQ vs EMQX</a><ol><li><a href=#31-七维选型矩阵>3.1 七维选型矩阵</a></li><li><a href=#32-商业版-vs-开源版>3.2 商业版 vs 开源版</a></li><li><a href=#33-社区活跃度对比2025-年-12-月数据>3.3 社区活跃度对比(2025 年 12 月数据)</a></li></ol></li><li><a href=#章节-4mq-核心原理>章节 4:MQ 核心原理</a><ol><li><a href=#通用消息模型producerbrokerconsumertopicqueue>通用消息模型:Producer/Broker/Consumer/Topic/Queue</a></li><li><a href=#rocketmq-存储架构commitlog--consumequeue--indexfile>RocketMQ 存储架构:CommitLog + ConsumeQueue + IndexFile</a></li><li><a href=#投递语义at-most-once--at-least-once--exactly-once>投递语义:at-most-once / at-least-once / exactly-once</a></li></ol></li><li><a href=#章节-5spring-cloud-stream--rocketmq-5x-集成>章节 5:Spring Cloud Stream + RocketMQ 5.x 集成</a><ol><li><a href=#applicationyml-完整配置>application.yml 完整配置</a></li><li><a href=#生产端chatclient-发送消息含事务消息>生产端:ChatClient 发送消息(含事务消息)</a></li><li><a href=#消费端streamlistener-接收--手动-ack--幂等>消费端:@StreamListener 接收 + 手动 ACK + 幂等</a></li><li><a href=#顺序消息spring-cloud-stream-partitionkey--自定义-partitioner>顺序消息:Spring Cloud Stream partitionKey + 自定义 Partitioner</a></li></ol></li><li><a href=#章节-6k8s-部署详细步骤>章节 6:K8s 部署详细步骤</a><ol><li><a href=#61-部署前准备>6.1 部署前准备</a></li><li><a href=#62-nameserver-部署>6.2 NameServer 部署</a></li><li><a href=#63-broker-部署statefulset--dledger>6.3 Broker 部署(StatefulSet + Dledger)</a></li><li><a href=#64-proxy-部署5x-grpc-接入层>6.4 Proxy 部署(5.x gRPC 接入层)</a></li><li><a href=#65-controller-部署自动选主>6.5 Controller 部署(自动选主)</a></li><li><a href=#部署后验证>部署后验证</a></li></ol></li><li><a href=#章节-7可靠性保证>章节 7:可靠性保证</a><ol><li><a href=#71-不丢同步刷盘--主从同步>7.1 不丢:同步刷盘 + 主从同步</a></li><li><a href=#72-不重幂等消费的-3-种武器>7.2 不重:幂等消费的 3 种武器</a></li><li><a href=#73-有序全局有序-vs-分区有序>7.3 有序:全局有序 vs 分区有序</a></li></ol></li><li><a href=#章节-8消息积压应急>章节 8:消息积压应急</a><ol><li><a href=#监控三大黄金指标>监控:三大黄金指标</a></li><li><a href=#排查四象限>排查四象限</a></li><li><a href=#应急三板斧>应急三板斧</a></li></ol></li><li><a href=#章节-9进阶特性>章节 9:进阶特性</a><ol><li><a href=#91-事务消息>9.1 事务消息</a></li><li><a href=#92-顺序消息>9.2 顺序消息</a></li><li><a href=#93-延迟消息>9.3 延迟消息</a></li><li><a href=#94-消息回溯>9.4 消息回溯</a></li></ol></li><li><a href=#章节-10mq-在我们项目的演进>章节 10:MQ 在我们项目的演进</a><ol><li><a href=#101-阶段一2023-q3-之前同步调用为主的重链路时代>10.1 阶段一(2023 Q3 之前):同步调用为主的"重链路"时代</a></li><li><a href=#102-阶段二2023-q4rocketmq-5x-试点引入>10.2 阶段二(2023 Q4):RocketMQ 5.x 试点引入</a></li><li><a href=#103-阶段三2024-全年eda-全量升级>10.3 阶段三(2024 全年):EDA 全量升级</a></li><li><a href=#104-阶段四2025-至今智能化可观测>10.4 阶段四(2025 至今):智能化可观测</a></li></ol></li><li><a href=#章节-11避坑指南12-个真实踩坑>章节 11:避坑指南:12 个真实踩坑</a></li><li><a href=#章节-12总结与展望>章节 12:总结与展望</a></li></ol></nav></div></section></aside><main class="main full-width"><article class="has-image main-article"><header class=article-header><div class=article-image><a href=/p/%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E6%B7%B1%E5%BA%A6%E5%AE%9E%E8%B7%B5%E4%BB%8E%E4%B8%9A%E5%8A%A1%E5%9C%BA%E6%99%AF%E5%88%B0%E7%94%9F%E4%BA%A7%E8%90%BD%E5%9C%B0/><img alt="Featured image of post 消息队列深度实践:从业务场景到生产落地" height=1000 loading=lazy sizes="(max-width: 767px) calc(100vw - 30px), (max-width: 1023px) 700px, (max-width: 1279px) 950px, 1232px" src=/p/%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E6%B7%B1%E5%BA%A6%E5%AE%9E%E8%B7%B5%E4%BB%8E%E4%B8%9A%E5%8A%A1%E5%9C%BA%E6%99%AF%E5%88%B0%E7%94%9F%E4%BA%A7%E8%90%BD%E5%9C%B0/image/cover.jpg srcset="/p/%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E6%B7%B1%E5%BA%A6%E5%AE%9E%E8%B7%B5%E4%BB%8E%E4%B8%9A%E5%8A%A1%E5%9C%BA%E6%99%AF%E5%88%B0%E7%94%9F%E4%BA%A7%E8%90%BD%E5%9C%B0/image/cover_hu_1cb6639dfe99f80d.jpg 800w, /p/%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E6%B7%B1%E5%BA%A6%E5%AE%9E%E8%B7%B5%E4%BB%8E%E4%B8%9A%E5%8A%A1%E5%9C%BA%E6%99%AF%E5%88%B0%E7%94%9F%E4%BA%A7%E8%90%BD%E5%9C%B0/image/cover.jpg 1600w" width=1600></a></div><div class=article-details><header class=article-category><a href=/categories/%E7%B3%BB%E7%BB%9F%E6%9E%B6%E6%9E%84/ style=background-color:#457b9d;color:#fff>系统架构</a></header><div class=article-title-wrapper><h2 class=article-title><a href=/p/%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97%E6%B7%B1%E5%BA%A6%E5%AE%9E%E8%B7%B5%E4%BB%8E%E4%B8%9A%E5%8A%A1%E5%9C%BA%E6%99%AF%E5%88%B0%E7%94%9F%E4%BA%A7%E8%90%BD%E5%9C%B0/>消息队列深度实践:从业务场景到生产落地</a></h2></div><footer class=article-meta><div class=inline-meta><svg class="icon icon-tabler icon-tabler-calendar-time" width="56" height="56" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><path d="M11.795 21H5a2 2 0 01-2-2V7a2 2 0 012-2h12a2 2 0 012 2v4"/><circle cx="18" cy="18" r="4"/><path d="M15 3v4"/><path d="M7 3v4"/><path d="M3 11h16"/><path d="M18 16.496V18l1 1"/></svg>
+<time class=article-time--published datetime=2026-06-06T00:00:00+08:00>2026年6月6日星期六</time>
+<svg class="icon icon-tabler icon-tabler-clock" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg>
+<time class=article-time--reading>阅读时长: 27 分钟</time></div></footer></div></header><aside class=article-toc><details><summary><div class=article-toc-title><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon icon-tabler icons-tabler-outline icon-tabler-chevron-right"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M9 6l6 6-6 6"/></svg>
+<span>目录</span></div></summary><nav class=toc-nav><ol><li><a href=#章节-1引子--从一次接口超时事故说起>章节 1:引子 —— 从一次接口超时事故说起</a></li><li><a href=#章节-2业务场景与三大核心价值>章节 2:业务场景与三大核心价值</a><ol><li><a href=#21-解耦三方协作的看不见的手>2.1 解耦:三方协作的"看不见的手"</a></li><li><a href=#22-异步让主链路轻装上阵>2.2 异步:让主链路轻装上阵</a></li><li><a href=#23-削峰用-8000-万日吞吐接住-5-万-qps-秒杀>2.3 削峰:用 8000 万日吞吐接住 5 万 QPS 秒杀</a></li></ol></li><li><a href=#章节-3选型对比--rocketmq-vs-rabbitmq-vs-emqx>章节 3:选型对比 —— RocketMQ vs RabbitMQ vs EMQX</a><ol><li><a href=#31-七维选型矩阵>3.1 七维选型矩阵</a></li><li><a href=#32-商业版-vs-开源版>3.2 商业版 vs 开源版</a></li><li><a href=#33-社区活跃度对比2025-年-12-月数据>3.3 社区活跃度对比(2025 年 12 月数据)</a></li></ol></li><li><a href=#章节-4mq-核心原理>章节 4:MQ 核心原理</a><ol><li><a href=#通用消息模型producerbrokerconsumertopicqueue>通用消息模型:Producer/Broker/Consumer/Topic/Queue</a></li><li><a href=#rocketmq-存储架构commitlog--consumequeue--indexfile>RocketMQ 存储架构:CommitLog + ConsumeQueue + IndexFile</a></li><li><a href=#投递语义at-most-once--at-least-once--exactly-once>投递语义:at-most-once / at-least-once / exactly-once</a></li></ol></li><li><a href=#章节-5spring-cloud-stream--rocketmq-5x-集成>章节 5:Spring Cloud Stream + RocketMQ 5.x 集成</a><ol><li><a href=#applicationyml-完整配置>application.yml 完整配置</a></li><li><a href=#生产端chatclient-发送消息含事务消息>生产端:ChatClient 发送消息(含事务消息)</a></li><li><a href=#消费端streamlistener-接收--手动-ack--幂等>消费端:@StreamListener 接收 + 手动 ACK + 幂等</a></li><li><a href=#顺序消息spring-cloud-stream-partitionkey--自定义-partitioner>顺序消息:Spring Cloud Stream partitionKey + 自定义 Partitioner</a></li></ol></li><li><a href=#章节-6k8s-部署详细步骤>章节 6:K8s 部署详细步骤</a><ol><li><a href=#61-部署前准备>6.1 部署前准备</a></li><li><a href=#62-nameserver-部署>6.2 NameServer 部署</a></li><li><a href=#63-broker-部署statefulset--dledger>6.3 Broker 部署(StatefulSet + Dledger)</a></li><li><a href=#64-proxy-部署5x-grpc-接入层>6.4 Proxy 部署(5.x gRPC 接入层)</a></li><li><a href=#65-controller-部署自动选主>6.5 Controller 部署(自动选主)</a></li><li><a href=#部署后验证>部署后验证</a></li></ol></li><li><a href=#章节-7可靠性保证>章节 7:可靠性保证</a><ol><li><a href=#71-不丢同步刷盘--主从同步>7.1 不丢:同步刷盘 + 主从同步</a></li><li><a href=#72-不重幂等消费的-3-种武器>7.2 不重:幂等消费的 3 种武器</a></li><li><a href=#73-有序全局有序-vs-分区有序>7.3 有序:全局有序 vs 分区有序</a></li></ol></li><li><a href=#章节-8消息积压应急>章节 8:消息积压应急</a><ol><li><a href=#监控三大黄金指标>监控:三大黄金指标</a></li><li><a href=#排查四象限>排查四象限</a></li><li><a href=#应急三板斧>应急三板斧</a></li></ol></li><li><a href=#章节-9进阶特性>章节 9:进阶特性</a><ol><li><a href=#91-事务消息>9.1 事务消息</a></li><li><a href=#92-顺序消息>9.2 顺序消息</a></li><li><a href=#93-延迟消息>9.3 延迟消息</a></li><li><a href=#94-消息回溯>9.4 消息回溯</a></li></ol></li><li><a href=#章节-10mq-在我们项目的演进>章节 10:MQ 在我们项目的演进</a><ol><li><a href=#101-阶段一2023-q3-之前同步调用为主的重链路时代>10.1 阶段一(2023 Q3 之前):同步调用为主的"重链路"时代</a></li><li><a href=#102-阶段二2023-q4rocketmq-5x-试点引入>10.2 阶段二(2023 Q4):RocketMQ 5.x 试点引入</a></li><li><a href=#103-阶段三2024-全年eda-全量升级>10.3 阶段三(2024 全年):EDA 全量升级</a></li><li><a href=#104-阶段四2025-至今智能化可观测>10.4 阶段四(2025 至今):智能化可观测</a></li></ol></li><li><a href=#章节-11避坑指南12-个真实踩坑>章节 11:避坑指南:12 个真实踩坑</a></li><li><a href=#章节-12总结与展望>章节 12:总结与展望</a></li></ol></nav></details></aside><section class=article-content><h1 id=消息队列深度实践>消息队列深度实践</h1><h2 id=章节-1引子--从一次接口超时事故说起>章节 1:引子 —— 从一次接口超时事故说起</h2><p>2024 年 6 月某个周二下午 14:23,监控告警群里突然炸开了锅:项目服务(project-service)的 P99 延迟从 180ms 飙升到 7,400ms,紧接着触发了下游 6 个微服务的雪崩超时。我拉了一下调用链详情,从前端创建订单入口到落库成功一共 6 跳:网关 → 用户中心 → 项目服务 → 任务服务 → 文档服务 → 消息服务 → 计费服务。前 4 跳加起来不超过 200ms,但消息服务和计费服务各贡献了 3,500ms,串行等待了 6.9 秒才返回。整个下单链路卡成了 PPT,业务方在群里连发了 17 条消息。</p><p>事后复盘:触发点不是 MQ 本身,而是<strong>计费服务调用的第三方支付通道在那个下午出现了 1.2 秒的抖动</strong>。因为是同步串行调用,一点抖动就被无限放大。这种架构下,任何一个下游的毛刺都会沿着调用链反向污染上游业务。也正是这次事故,让我坚定了把所有"非主链路逻辑"全部异步化的决心——消息队列不再是"可选架构组件",而是"必选的基础设施"。</p><h2 id=章节-2业务场景与三大核心价值>章节 2:业务场景与三大核心价值</h2><p>消息队列(下称 MQ)在我们 ToB SaaS 协作平台里的核心价值,归纳起来就是三个词:<strong>解耦、异步、削峰</strong>。这三个词看着像八股文套话,但每一个背后都踩过真实的坑。</p><h3 id=21-解耦三方协作的看不见的手>2.1 解耦:三方协作的"看不见的手"</h3><p>项目上线初期,我们的"创建项目"流程是同步调 3 个服务:订单服务、库存服务、支付服务,链路如下:前端 → 项目服务 → (订单 → 库存 → 支付),3 跳同步链。问题立刻出现——支付服务挂了,订单和库存也跟着挂,因为前端拿不到统一响应。一开始我们用 Spring Retry + CircuitBreaker 兜底,但随着业务方越来越多(项目里要带"任务、文档、知识库、工时"等模块),同步调用链从 3 跳扩到 9 跳,每次新接一个模块都得改主链路代码、回归测试、回滚预案全套。</p><p>引入 RocketMQ 5.x 之后,<strong>项目服务只负责落库 + 投递一条 ProjectCreated 事件</strong>,订单/库存/支付/任务/文档订阅同一 Topic 各自消费。<strong>新接入一个下游模块平均上线时间从 5 天压到 1.5 天</strong>(含联调),回归测试用例减少 60%(因为主链路不再感知下游)。截至 2025 年 12 月,ProjectCreated 事件 Topic 有 12 个订阅方,每天投递约 380 万条,单 Topic TPS 峰值 1.2 万,没有任何一次因为下游故障拖垮主链路。</p><h3 id=22-异步让主链路轻装上阵>2.2 异步:让主链路轻装上阵</h3><p>用户注册是我们最典型的异步场景。早年注册流程是同步:写库 → 发短信 → 发邮件 → 发欢迎 push → 初始化租户空间 → 同步给数据仓库(ODS),<strong>P99 延迟 1,420ms</strong>。我们做了 profiling 才发现:发短信 380ms、邮件 220ms、push 180ms、租户空间初始化 530ms,这 4 步是<strong>完全可以异步且互不依赖</strong>的。</p><p>改造方案:注册服务只做"写库 + 投递 UserRegistered 事件"两件事,短信/邮件/push/租户初始化各起独立的 Consumer Group 消费。改造后<strong>注册主链路 P99 从 1,420ms 降到 168ms</strong>(-88%),4 个下游子任务在 800ms 内全部完成。这个数字后来成了内部架构评审的"必问三连":能异步吗?能并行吗?能降级吗?</p><h3 id=23-削峰用-8000-万日吞吐接住-5-万-qps-秒杀>2.3 削峰:用 8000 万日吞吐接住 5 万 QPS 秒杀</h3><p>2025 年双 11,我们做了一场"协作空间年费会员秒杀",运营 0 元到 1 元秒杀 5,000 个名额。开抢瞬间网关侧 QPS 冲到 4.8 万(业务量评估的 5 倍),如果直接打到 MySQL 主库,按单机 8,000 QPS 算至少要 6 台才能扛住,而且<strong>开抢结束后 6 台机器会在 1 小时内闲置</strong>——典型的"为了 10 分钟高峰买单 6 台机器一整月"。</p><p>我们的方案是<strong>网关 → Redis 预扣 → 写消息队列 → 计费/库存/营销/日志异步消费</strong>。具体路径:</p><ol><li>网关层做用户限流(一人一单)和 IP 限流(200 QPS/IP),拦掉 35% 的机器流量</li><li>预扣成功后<strong>直接写一条 SeckillOrder 事件到 RocketMQ</strong>,主链路立即返回"排队中"给用户</li><li>6 个 Consumer Group 并行消费:扣库存、发券、加积分、写订单、发通知、写审计日志</li><li>削峰效果:MQ 入口峰值 4.8 万 QPS → 消费端 6 组 Consumer 共消耗 1,400 QPS(每组 230 QPS),<strong>MySQL 主库实际写流量控制在 1,200 QPS 以内</strong></li></ol><p>最终这场秒杀我们用了 1 台 8C16G 的 RocketMQ Broker(双副本)+ 2 台 4C8G 的 Consumer 节点,<strong>高峰期资源成本不超过 ¥280/小时</strong>。秒杀结束 30 分钟内所有积压消息消费完毕,<strong>零丢消息、零重复扣款、零资损</strong>。</p><h2 id=章节-3选型对比--rocketmq-vs-rabbitmq-vs-emqx>章节 3:选型对比 —— RocketMQ vs RabbitMQ vs EMQX</h2><p>2024 年那次事故之后,架构委员会让我牵头做一次全面的 MQ 选型评估。备选对象是三款:RocketMQ 5.x、RabbitMQ 3.13、EMQX 5.6。当时市面上能打的开源 MQ 还有很多(Kafka、Pulsar、NATS、ActiveMQ Artemis),但考虑到我们要替换的不只是异步消息、还有<strong>金融级可靠性(计费链路)+ 海量 Topic(30+ 微服务)+ 低延迟小消息(IM 推送)</strong>,这三类场景刚好对应 RocketMQ、RabbitMQ、EMQX 的强项,所以最终锁定了这三位做横评。</p><h3 id=31-七维选型矩阵>3.1 七维选型矩阵</h3><p>我从 7 个维度对三款产品做了实测 + 文档调研:</p><div class=table-wrapper><table><thead><tr><th>维度</th><th>RocketMQ 5.x</th><th>RabbitMQ 3.13</th><th>EMQX 5.6</th></tr></thead><tbody><tr><td><strong>协议</strong></td><td>自有协议(Java/Go/C++ 客户端);5.x 兼容 gRPC 和 HTTP/2</td><td>AMQP 0-9-1(事实标准)、MQTT、STOMP</td><td>MQTT 3.1.1/5.0、WebSocket、CoAP、LwM2M</td></tr><tr><td><strong>单机吞吐</strong></td><td>顺序写盘 + 零拷贝,单 Broker 8-10 万 TPS(实测)</td><td>单机 1-3 万 TPS,路由匹配成为瓶颈</td><td>单节点 100 万 MQTT 连接 / 10 万 TPS</td></tr><tr><td><strong>事务消息</strong></td><td>原生支持(二阶段提交 + 反查)</td><td>通过 AMQP 事务或插件实现,无原生</td><td>不支持事务(MQTT 协议层决定)</td></tr><tr><td><strong>顺序消息</strong></td><td>全局 / 分区顺序(Sharding Key)</td><td>不保证(多消费者并行消费)</td><td>不支持(MQTT 设计就是发布订阅,不强调顺序)</td></tr><tr><td><strong>社区活跃</strong></td><td>Apache 顶级项目,GitHub 21.4k stars,2024 年发版 4 次</td><td>Pivotal/Spring 维护,GitHub 12.6k stars,年发版 3-4 次</td><td>EMQ 公司主控,GitHub 14.8k stars,年发版 6+ 次</td></tr><tr><td><strong>商业支持</strong></td><td>阿里云 RocketMQ;原厂阿里中间件</td><td>VMware Tanzu RabbitMQ / 第三方云厂商</td><td>EMQX Enterprise(商业版含规则引擎 + 数据桥接)</td></tr><tr><td><strong>适用场景</strong></td><td>金融交易、订单链路、大规模分布式事务</td><td>传统企业集成、复杂路由、已有 AMQP 生态</td><td>IoT 设备、移动端、长连接、千万级设备管理</td></tr></tbody></table></div><h3 id=32-商业版-vs-开源版>3.2 商业版 vs 开源版</h3><p>三款产品都有"开源 + 商业版"双轨,但玩法完全不同:</p><ul><li><strong>RocketMQ</strong>:开源版(Apache 2.0)功能已经覆盖 90% 生产场景,Dledger 模式(我们用的)自带主从自动切换和 Raft 共识。阿里云商业版(消息队列 RocketMQ 版)额外提供<strong>全托管、监控告警、慢消费分析、消息轨迹、OpenAPI、专线接入</strong>。我们最终选了<strong>自建开源版 + 商业版监控组件混部</strong>——核心集群我们自己运维(掌控力强),监控告警走阿里云 ARMS(省人力)。</li><li><strong>RabbitMQ</strong>:开源版(MPL 2.0)单机性能优秀但集群模式复杂(镜像队列、Quorum Queue 各有坑)。商业版(VMware Tanzu RabbitMQ)主打企业级运维特性。如果走 VMware 商业版,License 成本按节点算,30 个 Broker 规模一年约 ¥180 万——超出我们预算。</li><li><strong>EMQX</strong>:开源版(Apache 2.0 for v5+)就够用,EMQX Enterprise 商业版(¥35 万/节点/年)<strong>主要卖规则引擎和数据桥接</strong>(Kafka/MySQL/PostgreSQL 双向同步)。如果只是用 MQTT broker,开源版完全够用。</li></ul><h3 id=33-社区活跃度对比2025-年-12-月数据>3.3 社区活跃度对比(2025 年 12 月数据)</h3><p>我截取了 2025 年 12 月的数据做对比:</p><div class=table-wrapper><table><thead><tr><th>指标</th><th>RocketMQ 5.x</th><th>RabbitMQ 3.13</th><th>EMQX 5.6</th></tr></thead><tbody><tr><td>GitHub stars</td><td>21,420</td><td>12,580</td><td>14,820</td></tr><tr><td>2025 年发版次数</td><td>5 次(5.0→5.3.2)</td><td>4 次(3.13.x patch)</td><td>8 次(5.6.x patch)</td></tr><tr><td>月活 issue 数</td><td>~280</td><td>~150</td><td>~190</td></tr><tr><td>Issue 平均首次响应</td><td>14 小时</td><td>28 小时</td><td>11 小时</td></tr><tr><td>中文文档完整度</td><td>★★★★★(阿里云文档丰富)</td><td>★★★(英文为主)</td><td>★★★★(EMQ 自营中文文档)</td></tr><tr><td>中文社区(钉钉/微信群)</td><td>6 个 2000 人群</td><td>2 个 500 人群</td><td>3 个 1500 人群</td></tr></tbody></table></div><p><strong>我们最终的选择</strong>:核心交易链路用 <strong>RocketMQ 5.x</strong>(事务消息、顺序消息、金融级可靠性),IM 推送/移动端消息用 <strong>EMQX</strong>(千万级长连接、原生 MQTT、推送 SDK 完善),RabbitMQ 只在两个旧系统里保留(历史包袱,不动了)。</p><p>这三款产品的深度对比和实操经验,会在后续章节里逐一展开。</p><h2 id=章节-4mq-核心原理>章节 4:MQ 核心原理</h2><p>讲到落地,不能只停留在"会用 API",得把 RocketMQ 的内核机制说透。这一节我们从三个层面剖开它:通用消息模型、RocketMQ 独有的存储架构、投递语义。</p><h3 id=通用消息模型producerbrokerconsumertopicqueue>通用消息模型:Producer/Broker/Consumer/Topic/Queue</h3><p>任何一款消息中间件,无论 RocketMQ、Kafka 还是 RabbitMQ,都脱不开下面这个五元素模型。Producer 把消息按 Topic 分类,Broker 负责落地存储,Consumer 按订阅关系拉取,Queue 是 Topic 内部的并行分片,NameServer/Registry 维护路由发现。</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-text data-lang=text><span class=line><span class=cl>┌──────────┐    1.send(topic, msg)    ┌──────────┐
+</span></span><span class=line><span class=cl>│ Producer │ ──────────────────────▶ │  Broker  │
+</span></span><span class=line><span class=cl>│ (订单服务)│                          │  Node-1  │
+</span></span><span class=line><span class=cl>└──────────┘                          │ ┌──────┐ │
+</span></span><span class=line><span class=cl>                                      │ │TopicA│ │
+</span></span><span class=line><span class=cl>┌──────────┐    4.pull(topic, queue)  │ │Q0 Q1 │ │
+</span></span><span class=line><span class=cl>│ Consumer │ ◀────────────────────── │ │Q2 Q3 │ │
+</span></span><span class=line><span class=cl>│(库存服务) │                          │ └──────┘ │
+</span></span><span class=line><span class=cl>└──────────┘                          └──────────┘
+</span></span><span class=line><span class=cl>                                      ┌──────────┐
+</span></span><span class=line><span class=cl>                  2.register ◀───────  │NameServer│
+</span></span><span class=line><span class=cl>                  3.update ────────▶  │  集群    │
+</span></span><span class=line><span class=cl>                                      └──────────┘
+</span></span></code></pre></td></tr></table></div></div><p>我们项目里 Topic 数稳定在 87 个,每个 Topic 默认 4 个 Queue,单 Broker 节点承载 12 万 QPS 写入无压力。Queue 数决定了<strong>最大并行消费的并发度</strong>——这跟 Kafka 的 Partition 概念一致,生产环境扩容第一条就是加 Queue。</p><h3 id=rocketmq-存储架构commitlog--consumequeue--indexfile>RocketMQ 存储架构:CommitLog + ConsumeQueue + IndexFile</h3><p>RocketMQ 的存储设计是它能从阿里双十一扛住万亿级流量的核心,精髓就是<strong>顺序写 + 索引读</strong>。所有 Topic 的消息统一追加写入磁盘上的 <code>CommitLog</code> 文件(默认 1G 一片),<code>ConsumeQueue</code> 是逻辑队列索引(20 字节定长,记录 msgOffset/size/tagHash),<code>IndexFile</code> 则是按 key 建的哈希索引,支持按消息 Key 快速反查。</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-text data-lang=text><span class=line><span class=cl>  Producer 写入路径
+</span></span><span class=line><span class=cl>  ────────────────
+</span></span><span class=line><span class=cl>  msg1 ─┐
+</span></span><span class=line><span class=cl>  msg2 ─┤
+</span></span><span class=line><span class=cl>  msg3 ─┼──▶ Broker ──▶ CommitLog(顺序写,append only)
+</span></span><span class=line><span class=cl>  msg4 ─┤                 (1G/片,文件名=起始偏移)
+</span></span><span class=line><span class=cl>  msg5 ─┘                       │
+</span></span><span class=line><span class=cl>                                │ 每条 msg 落盘时异步构建
+</span></span><span class=line><span class=cl>                                ▼
+</span></span><span class=line><span class=cl>                        ┌─────────────────┐
+</span></span><span class=line><span class=cl>                        │  ConsumeQueue    │ ◀── Consumer 拉取入口
+</span></span><span class=line><span class=cl>                        │  (TopicA/Queue0) │     (类似&#34;目录&#34;)
+</span></span><span class=line><span class=cl>                        │  offset/size/tag │
+</span></span><span class=line><span class=cl>                        └─────────────────┘
+</span></span><span class=line><span class=cl>                                │
+</span></span><span class=line><span class=cl>                                │ 按 msgKey 反查时
+</span></span><span class=line><span class=cl>                                ▼
+</span></span><span class=line><span class=cl>                        ┌─────────────────┐
+</span></span><span class=line><span class=cl>                        │   IndexFile     │ ◀── 按 key 查询
+</span></span><span class=line><span class=cl>                        │  (Hash 500w槽)  │
+</span></span><span class=line><span class=cl>                        └─────────────────┘
+</span></span></code></pre></td></tr></table></div></div><p>我在 2024 年做消息轨迹系统时实测过,按 msgKey 反查一次消息,<code>IndexFile</code> 路径耗时稳定在 <strong>2-4 ms</strong>;按 offset 走 <code>ConsumeQueue</code> 路径,直接命中 page cache 时是 <strong>0.3 ms</strong>。所以官方文档反复强调:<strong>能走 ConsumeQueue 就不要走 IndexFile</strong>。我们业务里 90% 场景是按 Queue offset 顺序消费,只有管理后台查"某订单号对应的消息体"才用到 IndexFile。</p><p><code>CommitLog</code> 顺序写带来的另一个红利是<strong>Page Cache 友好</strong>——我们 Broker 用的是 NVMe SSD,但实测机械盘也能扛 5 万 QPS,瓶颈在网络而不是磁盘。生产环境我们用 <code>ASYNC_FLUSH</code>(异步刷盘) + <code>SYNC_MASTER</code>(主从同步)双 11 配置,P99 写入延迟 8 ms。</p><h3 id=投递语义at-most-once--at-least-once--exactly-once>投递语义:at-most-once / at-least-once / exactly-once</h3><div class=table-wrapper><table><thead><tr><th>语义</th><th>含义</th><th>实现代价</th><th>适用场景</th></tr></thead><tbody><tr><td>at-most-once</td><td>消息最多被消费一次,可能丢</td><td>最低</td><td>日志采集(丢一两条无所谓)</td></tr><tr><td>at-least-once</td><td>消息至少被消费一次,可能重</td><td>中</td><td>绝大多数业务场景</td></tr><tr><td>exactly-once</td><td>消息恰好被消费一次</td><td>高</td><td>金融扣款、库存扣减</td></tr></tbody></table></div><p>RocketMQ 5.x 之前,严格意义上没有原生的 exactly-once,业界通用做法是 <strong>at-least-once + 消费端幂等</strong>。5.x 引入了 <code>transaction</code> 消息和 <code>pop</code> 消费模式,前者保证生产者侧不丢,后者配合 <code>BROADCASTING/CLUSTERING</code> 模式 + 本地消息表,可以做到接近 exactly-once 的效果。我们项目里所有"金额"类操作(充值、扣费)走的就是事务消息 + 幂等表双保险,99.99% 场景没出过重复扣款。</p><h2 id=章节-5spring-cloud-stream--rocketmq-5x-集成>章节 5:Spring Cloud Stream + RocketMQ 5.x 集成</h2><p>理论讲完,这一节我们落到代码。Spring Cloud Stream(简称 SCSt)屏蔽了底层 MQ 差异,业务代码只面向 <code>MessageChannel</code> 编程,真正切换 MQ 时改个 starter 依赖即可。我们项目 30+ 微服务全部统一了 SCSt + RocketMQ Binder,日均收发 8000 万条消息零故障运行。</p><h3 id=applicationyml-完整配置>application.yml 完整配置</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span><span class=lnt>36
+</span><span class=lnt>37
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>spring</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>application</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>chat-service</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>cloud</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>stream</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>rocketmq</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>binder</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>name-server</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-nameserver:9876</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>access-key</span><span class=p>:</span><span class=w> </span><span class=l>${ROCKETMQ_AK}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>secret-key</span><span class=p>:</span><span class=w> </span><span class=l>${ROCKETMQ_SK}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>vip-channel-enabled</span><span class=p>:</span><span class=w> </span><span class=kc>false</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>bindings</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>output-chat-message</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=nt>producer</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>group</span><span class=p>:</span><span class=w> </span><span class=l>chat-message-producer</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>sync</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>delivery-timeout</span><span class=p>:</span><span class=w> </span><span class=m>5000</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>max-message-size</span><span class=p>:</span><span class=w> </span><span class=m>4194304</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>message-orderly</span><span class=p>:</span><span class=w> </span><span class=kc>false</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>transactional-message-enabled</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>input-chat-message</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=nt>consumer</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>group</span><span class=p>:</span><span class=w> </span><span class=l>chat-message-consumer</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>orderly</span><span class=p>:</span><span class=w> </span><span class=kc>false</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>max-attempts</span><span class=p>:</span><span class=w> </span><span class=m>3</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>pull-batch-size</span><span class=p>:</span><span class=w> </span><span class=m>32</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>push-orderly</span><span class=p>:</span><span class=w> </span><span class=kc>false</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>bindings</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>output-chat-message</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>destination</span><span class=p>:</span><span class=w> </span><span class=l>CHAT_MESSAGE_TOPIC</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>content-type</span><span class=p>:</span><span class=w> </span><span class=l>application/json</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>input-chat-message</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>destination</span><span class=p>:</span><span class=w> </span><span class=l>CHAT_MESSAGE_TOPIC</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>group</span><span class=p>:</span><span class=w> </span><span class=l>chat-message-consumer</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>consumer</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=nt>concurrency</span><span class=p>:</span><span class=w> </span><span class=m>8</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=nt>max-attempts</span><span class=p>:</span><span class=w> </span><span class=m>3</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>要点:每个 binding 显式声明 <code>destination</code>(Topic 名)和 <code>group</code>(消费组);<code>concurrency: 8</code> 等于这个消费者实例起 8 个线程并发拉;<code>transactional-message-enabled: true</code> 打开事务消息开关。</p><h3 id=生产端chatclient-发送消息含事务消息>生产端:ChatClient 发送消息(含事务消息)</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span><span class=lnt>36
+</span><span class=lnt>37
+</span><span class=lnt>38
+</span><span class=lnt>39
+</span><span class=lnt>40
+</span><span class=lnt>41
+</span><span class=lnt>42
+</span><span class=lnt>43
+</span><span class=lnt>44
+</span><span class=lnt>45
+</span><span class=lnt>46
+</span><span class=lnt>47
+</span><span class=lnt>48
+</span><span class=lnt>49
+</span><span class=lnt>50
+</span><span class=lnt>51
+</span><span class=lnt>52
+</span><span class=lnt>53
+</span><span class=lnt>54
+</span><span class=lnt>55
+</span><span class=lnt>56
+</span><span class=lnt>57
+</span><span class=lnt>58
+</span><span class=lnt>59
+</span><span class=lnt>60
+</span><span class=lnt>61
+</span><span class=lnt>62
+</span><span class=lnt>63
+</span><span class=lnt>64
+</span><span class=lnt>65
+</span><span class=lnt>66
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=kn>package</span><span class=w> </span><span class=nn>com.saas.chat.mq</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.cloud.stream.function.StreamBridge</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.messaging.Message</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.messaging.MessageHeaders</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.messaging.support.MessageBuilder</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.stereotype.Component</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.client.producer.LocalTransactionChecker</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.client.producer.TransactionListener</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.common.message.MessageConst</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.common.message.MessageExt</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.beans.factory.annotation.Autowired</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.messaging.MessagingException</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>lombok.extern.slf4j.Slf4j</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>java.nio.charset.StandardCharsets</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>java.util.HashMap</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>java.util.Map</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>java.util.UUID</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nd>@Slf4j</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nd>@Component</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kd>public</span><span class=w> </span><span class=kd>class</span> <span class=nc>ChatMessageProducer</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Autowired</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>private</span><span class=w> </span><span class=n>StreamBridge</span><span class=w> </span><span class=n>streamBridge</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=cm>/**
+</span></span></span><span class=line><span class=cl><span class=cm>     * 普通消息发送:同步等待 Broker ACK,3 秒内未确认抛异常走重试
+</span></span></span><span class=line><span class=cl><span class=cm>     */</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=kt>boolean</span><span class=w> </span><span class=nf>sendNormal</span><span class=p>(</span><span class=n>ChatMessageDTO</span><span class=w> </span><span class=n>msg</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>Message</span><span class=o>&lt;</span><span class=n>ChatMessageDTO</span><span class=o>&gt;</span><span class=w> </span><span class=n>message</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>MessageBuilder</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=p>.</span><span class=na>withPayload</span><span class=p>(</span><span class=n>msg</span><span class=p>)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=p>.</span><span class=na>setHeader</span><span class=p>(</span><span class=s>&#34;msgId&#34;</span><span class=p>,</span><span class=w> </span><span class=n>msg</span><span class=p>.</span><span class=na>getMsgId</span><span class=p>())</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=p>.</span><span class=na>setHeader</span><span class=p>(</span><span class=s>&#34;tenantId&#34;</span><span class=p>,</span><span class=w> </span><span class=n>msg</span><span class=p>.</span><span class=na>getTenantId</span><span class=p>())</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=p>.</span><span class=na>build</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>try</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>streamBridge</span><span class=p>.</span><span class=na>send</span><span class=p>(</span><span class=s>&#34;output-chat-message&#34;</span><span class=p>,</span><span class=w> </span><span class=n>message</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>return</span><span class=w> </span><span class=kc>true</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w> </span><span class=k>catch</span><span class=w> </span><span class=p>(</span><span class=n>MessagingException</span><span class=w> </span><span class=n>e</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>log</span><span class=p>.</span><span class=na>error</span><span class=p>(</span><span class=s>&#34;sendNormal failed, msgId={}&#34;</span><span class=p>,</span><span class=w> </span><span class=n>msg</span><span class=p>.</span><span class=na>getMsgId</span><span class=p>(),</span><span class=w> </span><span class=n>e</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>return</span><span class=w> </span><span class=kc>false</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=cm>/**
+</span></span></span><span class=line><span class=cl><span class=cm>     * 事务消息发送:先发 half 消息,本地事务执行后 commit/rollback
+</span></span></span><span class=line><span class=cl><span class=cm>     * RocketMQ Broker 会在 unknown 状态回调 checkLocalTransactionState
+</span></span></span><span class=line><span class=cl><span class=cm>     */</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=kt>boolean</span><span class=w> </span><span class=nf>sendTransactional</span><span class=p>(</span><span class=n>ChatMessageDTO</span><span class=w> </span><span class=n>msg</span><span class=p>,</span><span class=w> </span><span class=n>LocalBizExecutor</span><span class=w> </span><span class=n>executor</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>Map</span><span class=o>&lt;</span><span class=n>String</span><span class=p>,</span><span class=w> </span><span class=n>Object</span><span class=o>&gt;</span><span class=w> </span><span class=n>headers</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=k>new</span><span class=w> </span><span class=n>HashMap</span><span class=o>&lt;&gt;</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>headers</span><span class=p>.</span><span class=na>put</span><span class=p>(</span><span class=s>&#34;msgId&#34;</span><span class=p>,</span><span class=w> </span><span class=n>msg</span><span class=p>.</span><span class=na>getMsgId</span><span class=p>());</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>headers</span><span class=p>.</span><span class=na>put</span><span class=p>(</span><span class=n>MessageConst</span><span class=p>.</span><span class=na>PROPERTY_TRANSACTION_KEY</span><span class=p>,</span><span class=w> </span><span class=n>msg</span><span class=p>.</span><span class=na>getMsgId</span><span class=p>());</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>Message</span><span class=o>&lt;</span><span class=n>ChatMessageDTO</span><span class=o>&gt;</span><span class=w> </span><span class=n>message</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>MessageBuilder</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=p>.</span><span class=na>withPayload</span><span class=p>(</span><span class=n>msg</span><span class=p>)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=p>.</span><span class=na>copyHeaders</span><span class=p>(</span><span class=n>headers</span><span class=p>)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=p>.</span><span class=na>build</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>try</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>streamBridge</span><span class=p>.</span><span class=na>send</span><span class=p>(</span><span class=s>&#34;output-tx-chat-message&#34;</span><span class=p>,</span><span class=w> </span><span class=n>message</span><span class=p>,</span><span class=w> </span><span class=n>executor</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>return</span><span class=w> </span><span class=kc>true</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w> </span><span class=k>catch</span><span class=w> </span><span class=p>(</span><span class=n>MessagingException</span><span class=w> </span><span class=n>e</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>log</span><span class=p>.</span><span class=na>error</span><span class=p>(</span><span class=s>&#34;sendTransactional failed, msgId={}&#34;</span><span class=p>,</span><span class=w> </span><span class=n>msg</span><span class=p>.</span><span class=na>getMsgId</span><span class=p>(),</span><span class=w> </span><span class=n>e</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>return</span><span class=w> </span><span class=kc>false</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>}</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>事务消息需要绑定一个 <code>TransactionSynchronization</code> 或 <code>RocketMQTransactionChecker</code>,核心是 <strong>half 消息发送 → 本地事务执行 → Broker 二次回调确认</strong>。我们用 <code>RocketMQTemplate</code> + <code>TransactionListener</code> 方式,这里给出 <code>LocalTransactionChecker</code> 实现的精简版:</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span><span class=lnt>36
+</span><span class=lnt>37
+</span><span class=lnt>38
+</span><span class=lnt>39
+</span><span class=lnt>40
+</span><span class=lnt>41
+</span><span class=lnt>42
+</span><span class=lnt>43
+</span><span class=lnt>44
+</span><span class=lnt>45
+</span><span class=lnt>46
+</span><span class=lnt>47
+</span><span class=lnt>48
+</span><span class=lnt>49
+</span><span class=lnt>50
+</span><span class=lnt>51
+</span><span class=lnt>52
+</span><span class=lnt>53
+</span><span class=lnt>54
+</span><span class=lnt>55
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=kn>package</span><span class=w> </span><span class=nn>com.saas.chat.mq.tx</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.client.producer.LocalTransactionChecker</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.common.message.MessageExt</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.spring.annotation.RocketMQTransactionListener</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.spring.core.RocketMQLocalTransactionListener</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.spring.core.RocketMQLocalTransactionState</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.messaging.Message</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>lombok.extern.slf4j.Slf4j</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.stereotype.Component</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>javax.annotation.Resource</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nd>@Slf4j</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nd>@Component</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nd>@RocketMQTransactionListener</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kd>public</span><span class=w> </span><span class=kd>class</span> <span class=nc>ChatTxMessageChecker</span><span class=w> </span><span class=kd>implements</span><span class=w> </span><span class=n>RocketMQLocalTransactionListener</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Resource</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>private</span><span class=w> </span><span class=n>ChatMessageTxLogService</span><span class=w> </span><span class=n>txLogService</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=cm>/**
+</span></span></span><span class=line><span class=cl><span class=cm>     * 本地事务执行器
+</span></span></span><span class=line><span class=cl><span class=cm>     */</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Override</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=n>RocketMQLocalTransactionState</span><span class=w> </span><span class=nf>executeLocalTransaction</span><span class=p>(</span><span class=n>Message</span><span class=w> </span><span class=n>message</span><span class=p>,</span><span class=w> </span><span class=n>Object</span><span class=w> </span><span class=n>arg</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>String</span><span class=w> </span><span class=n>msgId</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=p>(</span><span class=n>String</span><span class=p>)</span><span class=w> </span><span class=n>message</span><span class=p>.</span><span class=na>getHeaders</span><span class=p>().</span><span class=na>get</span><span class=p>(</span><span class=s>&#34;msgId&#34;</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>try</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>LocalBizExecutor</span><span class=w> </span><span class=n>executor</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=p>(</span><span class=n>LocalBizExecutor</span><span class=p>)</span><span class=w> </span><span class=n>arg</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=kt>boolean</span><span class=w> </span><span class=n>ok</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>executor</span><span class=p>.</span><span class=na>doBiz</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>if</span><span class=w> </span><span class=p>(</span><span class=n>ok</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>txLogService</span><span class=p>.</span><span class=na>markSuccess</span><span class=p>(</span><span class=n>msgId</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=k>return</span><span class=w> </span><span class=n>RocketMQLocalTransactionState</span><span class=p>.</span><span class=na>COMMIT</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>}</span><span class=w> </span><span class=k>else</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>txLogService</span><span class=p>.</span><span class=na>markRollback</span><span class=p>(</span><span class=n>msgId</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=k>return</span><span class=w> </span><span class=n>RocketMQLocalTransactionState</span><span class=p>.</span><span class=na>ROLLBACK</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w> </span><span class=k>catch</span><span class=w> </span><span class=p>(</span><span class=n>Exception</span><span class=w> </span><span class=n>e</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>log</span><span class=p>.</span><span class=na>error</span><span class=p>(</span><span class=s>&#34;executeLocalTransaction failed, msgId={}&#34;</span><span class=p>,</span><span class=w> </span><span class=n>msgId</span><span class=p>,</span><span class=w> </span><span class=n>e</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>return</span><span class=w> </span><span class=n>RocketMQLocalTransactionState</span><span class=p>.</span><span class=na>UNKNOWN</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=cm>/**
+</span></span></span><span class=line><span class=cl><span class=cm>     * Broker 回调:消息状态 UNKNOWN 时触发,反查本地事务表
+</span></span></span><span class=line><span class=cl><span class=cm>     */</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Override</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=n>RocketMQLocalTransactionState</span><span class=w> </span><span class=nf>checkLocalTransaction</span><span class=p>(</span><span class=n>MessageExt</span><span class=w> </span><span class=n>messageExt</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>String</span><span class=w> </span><span class=n>msgId</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>messageExt</span><span class=p>.</span><span class=na>getProperty</span><span class=p>(</span><span class=s>&#34;msgId&#34;</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=kt>boolean</span><span class=w> </span><span class=n>exists</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>txLogService</span><span class=p>.</span><span class=na>checkExists</span><span class=p>(</span><span class=n>msgId</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>if</span><span class=w> </span><span class=p>(</span><span class=n>exists</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>return</span><span class=w> </span><span class=n>RocketMQLocalTransactionState</span><span class=p>.</span><span class=na>COMMIT</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>return</span><span class=w> </span><span class=n>RocketMQLocalTransactionState</span><span class=p>.</span><span class=na>ROLLBACK</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>}</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><h3 id=消费端streamlistener-接收--手动-ack--幂等>消费端:@StreamListener 接收 + 手动 ACK + 幂等</h3><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span><span class=lnt>36
+</span><span class=lnt>37
+</span><span class=lnt>38
+</span><span class=lnt>39
+</span><span class=lnt>40
+</span><span class=lnt>41
+</span><span class=lnt>42
+</span><span class=lnt>43
+</span><span class=lnt>44
+</span><span class=lnt>45
+</span><span class=lnt>46
+</span><span class=lnt>47
+</span><span class=lnt>48
+</span><span class=lnt>49
+</span><span class=lnt>50
+</span><span class=lnt>51
+</span><span class=lnt>52
+</span><span class=lnt>53
+</span><span class=lnt>54
+</span><span class=lnt>55
+</span><span class=lnt>56
+</span><span class=lnt>57
+</span><span class=lnt>58
+</span><span class=lnt>59
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=kn>package</span><span class=w> </span><span class=nn>com.saas.chat.mq.consumer</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.cloud.stream.annotation.StreamListener</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.cloud.stream.messaging.Sink</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.messaging.handler.annotation.Payload</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.stereotype.Component</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.beans.factory.annotation.Autowired</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>com.saas.chat.service.ChatService</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>com.saas.chat.entity.ChatMessageDTO</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>com.saas.chat.mq.ack.AckManualHelper</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>lombok.extern.slf4j.Slf4j</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>com.fasterxml.jackson.databind.ObjectMapper</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.common.message.MessageConst</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nd>@Slf4j</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nd>@Component</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kd>public</span><span class=w> </span><span class=kd>class</span> <span class=nc>ChatMessageConsumer</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Autowired</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>private</span><span class=w> </span><span class=n>ChatService</span><span class=w> </span><span class=n>chatService</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Autowired</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>private</span><span class=w> </span><span class=n>IdempotentChecker</span><span class=w> </span><span class=n>idempotentChecker</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Autowired</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>private</span><span class=w> </span><span class=n>AckManualHelper</span><span class=w> </span><span class=n>ackHelper</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Autowired</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>private</span><span class=w> </span><span class=n>ObjectMapper</span><span class=w> </span><span class=n>objectMapper</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=cm>/**
+</span></span></span><span class=line><span class=cl><span class=cm>     * 接收消息 + 幂等校验 + 手动 ACK
+</span></span></span><span class=line><span class=cl><span class=cm>     * ackMode=MANUAL 时必须显式调用 ackHelper.ack()
+</span></span></span><span class=line><span class=cl><span class=cm>     */</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@StreamListener</span><span class=p>(</span><span class=n>value</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>Sink</span><span class=p>.</span><span class=na>INPUT</span><span class=p>,</span><span class=w> </span><span class=n>condition</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=s>&#34;headers[&#39;rocketmq_flag&#39;]==&#39;chat_msg&#39;&#34;</span><span class=p>)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=kt>void</span><span class=w> </span><span class=nf>onMessage</span><span class=p>(</span><span class=nd>@Payload</span><span class=w> </span><span class=n>ChatMessageDTO</span><span class=w> </span><span class=n>msg</span><span class=p>,</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                          </span><span class=n>org</span><span class=p>.</span><span class=na>springframework</span><span class=p>.</span><span class=na>messaging</span><span class=p>.</span><span class=na>MessageHeaders</span><span class=w> </span><span class=n>headers</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>String</span><span class=w> </span><span class=n>msgId</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=p>(</span><span class=n>String</span><span class=p>)</span><span class=w> </span><span class=n>headers</span><span class=p>.</span><span class=na>get</span><span class=p>(</span><span class=s>&#34;msgId&#34;</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>String</span><span class=w> </span><span class=n>tenantId</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=p>(</span><span class=n>String</span><span class=p>)</span><span class=w> </span><span class=n>headers</span><span class=p>.</span><span class=na>get</span><span class=p>(</span><span class=s>&#34;tenantId&#34;</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>try</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=c1>// 1. 幂等校验:已处理过直接 ACK 跳过</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>if</span><span class=w> </span><span class=p>(</span><span class=n>idempotentChecker</span><span class=p>.</span><span class=na>isProcessed</span><span class=p>(</span><span class=n>msgId</span><span class=p>))</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>log</span><span class=p>.</span><span class=na>debug</span><span class=p>(</span><span class=s>&#34;msg already processed, skip. msgId={}&#34;</span><span class=p>,</span><span class=w> </span><span class=n>msgId</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=n>ackHelper</span><span class=p>.</span><span class=na>ack</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>                </span><span class=k>return</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=c1>// 2. 业务处理</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>chatService</span><span class=p>.</span><span class=na>handleMessage</span><span class=p>(</span><span class=n>msg</span><span class=p>,</span><span class=w> </span><span class=n>tenantId</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=c1>// 3. 写入幂等表(用 msgId 主键,带过期时间 7 天)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>idempotentChecker</span><span class=p>.</span><span class=na>markProcessed</span><span class=p>(</span><span class=n>msgId</span><span class=p>,</span><span class=w> </span><span class=n>7</span><span class=w> </span><span class=o>*</span><span class=w> </span><span class=n>24</span><span class=w> </span><span class=o>*</span><span class=w> </span><span class=n>3600</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=c1>// 4. 手动 ACK</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>ackHelper</span><span class=p>.</span><span class=na>ack</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w> </span><span class=k>catch</span><span class=w> </span><span class=p>(</span><span class=n>Exception</span><span class=w> </span><span class=n>e</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>log</span><span class=p>.</span><span class=na>error</span><span class=p>(</span><span class=s>&#34;onMessage failed, msgId={}&#34;</span><span class=p>,</span><span class=w> </span><span class=n>msgId</span><span class=p>,</span><span class=w> </span><span class=n>e</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=c1>// 5. 异常:不 ACK,Broker 会在 30s 后重新投递</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=c1>//    max-attempts=3 控制最大重试次数,超 3 次进死信队列</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>}</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>幂等表我们用的是 MySQL <code>chat_msg_idempotent</code>,主键 <code>msg_id</code>,带 <code>tenant_id</code> 联合索引;Redis 版本也做过,大促期间 Redis TTL 设 24 小时兜底。</p><h3 id=顺序消息spring-cloud-stream-partitionkey--自定义-partitioner>顺序消息:Spring Cloud Stream partitionKey + 自定义 Partitioner</h3><p>业务上"同一会话的聊天消息必须按发送顺序投递"——这就是顺序消息的应用场景。RocketMQ 5.x 通过 <strong>Sharding Key + Queue 锁定</strong> 保证同一 Key 的消息进同一 Queue,Consumer 用 <code>MessageListenerOrderly</code> 串行消费。</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=kn>package</span><span class=w> </span><span class=nn>com.saas.chat.mq.partition</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.apache.rocketmq.common.message.MessageConst</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.cloud.stream.binder.PartitionSelectorStrategy</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.messaging.Message</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>org.springframework.stereotype.Component</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kn>import</span><span class=w> </span><span class=nn>lombok.extern.slf4j.Slf4j</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nd>@Slf4j</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nd>@Component</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kd>public</span><span class=w> </span><span class=kd>class</span> <span class=nc>ConversationPartitioner</span><span class=w> </span><span class=kd>implements</span><span class=w> </span><span class=n>PartitionSelectorStrategy</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=cm>/**
+</span></span></span><span class=line><span class=cl><span class=cm>     * 根据会话 ID 算分区号,保证同一会话的消息进同一 Queue
+</span></span></span><span class=line><span class=cl><span class=cm>     * partitionCount 必须和 Topic 的 Queue 数一致
+</span></span></span><span class=line><span class=cl><span class=cm>     */</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Override</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=kt>int</span><span class=w> </span><span class=nf>selectPartition</span><span class=p>(</span><span class=n>Message</span><span class=o>&lt;?&gt;</span><span class=w> </span><span class=n>message</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>Object</span><span class=w> </span><span class=n>convId</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>message</span><span class=p>.</span><span class=na>getHeaders</span><span class=p>().</span><span class=na>get</span><span class=p>(</span><span class=s>&#34;conversationId&#34;</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>if</span><span class=w> </span><span class=p>(</span><span class=n>convId</span><span class=w> </span><span class=o>==</span><span class=w> </span><span class=kc>null</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>return</span><span class=w> </span><span class=n>0</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=kt>int</span><span class=w> </span><span class=n>hash</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>Math</span><span class=p>.</span><span class=na>abs</span><span class=p>(</span><span class=n>convId</span><span class=p>.</span><span class=na>hashCode</span><span class=p>());</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=kt>int</span><span class=w> </span><span class=n>partitionCount</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>8</span><span class=p>;</span><span class=w>  </span><span class=c1>// 与 Broker 配置 readQueueNums=8 一致</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>return</span><span class=w> </span><span class=n>hash</span><span class=w> </span><span class=o>%</span><span class=w> </span><span class=n>partitionCount</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>}</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p><code>application.yml</code> 里绑定顺序消息的 binding 要显式声明 <code>partitioned: true</code> 和 <code>partition-key-expression</code>:</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>spring</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>cloud</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>stream</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>bindings</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>output-orderly-message</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>destination</span><span class=p>:</span><span class=w> </span><span class=l>CHAT_ORDERLY_TOPIC</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>partitioned</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>partition-key-expression</span><span class=p>:</span><span class=w> </span><span class=l>headers[&#39;conversationId&#39;]</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>producer</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=nt>partition-count</span><span class=p>:</span><span class=w> </span><span class=m>8</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>input-orderly-message</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>destination</span><span class=p>:</span><span class=w> </span><span class=l>CHAT_ORDERLY_TOPIC</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>group</span><span class=p>:</span><span class=w> </span><span class=l>chat-orderly-consumer</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>consumer</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=nt>partitioned</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=nt>concurrency</span><span class=p>:</span><span class=w> </span><span class=m>8</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>发送时只用 <code>MessageBuilder.withPayload(msg).setHeader("conversationId", convId).build()</code> 即可,RocketMQ Binder 会自动调我们写的 <code>ConversationPartitioner</code> 计算分区号。</p><blockquote><p>💡 <strong>工程经验</strong>
+顺序消息性能上限是单 Queue 的消费能力,8 Queue 时单实例 8 并发,P99 延迟 12 ms。如果某会话热度极高(如万人群聊),需要做<strong>会话分片</strong>——把超大会话拆成 N 个逻辑子会话,各走不同 Key 哈希,避免单 Queue 阻塞。</p></blockquote><blockquote><p>🛑 <strong>避坑提示</strong>
+事务消息不能和顺序消息混用——<code>messageOrderly=true</code> 时 <code>transactional-message-enabled</code> 必须关闭;另外生产端务必设置 <code>delivery-timeout: 5000</code> 以上的值,否则事务 half 消息在 3 秒内未 commit 会被 Broker 主动回滚。</p></blockquote><h2 id=章节-6k8s-部署详细步骤>章节 6:K8s 部署详细步骤</h2><p>我们在 2025 年 Q1 把 RocketMQ 5.x 从 ECS 物理部署整体迁到 K8s,完整链路 NameServer + Broker + Proxy + Controller 全部容器化,6 节点集群滚动升级耗时从原先 50 分钟压到 12 分钟,资源利用率(CPU 平均使用率)从 18% 提到 47%。这一节把我们当时落地用的全套 YAML 资源拆开讲。</p><h3 id=61-部署前准备>6.1 部署前准备</h3><p>我们用独立 Namespace 隔离 MQ 组件,存储走 SSD StorageClass(阿里云 ESSD PL1, 100Gi 提供 6800 IOPS),够 commitlog 顺序写吃满。</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>apiVersion</span><span class=p>:</span><span class=w> </span><span class=l>v1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>kind</span><span class=p>:</span><span class=w> </span><span class=l>Namespace</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nn>---</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>apiVersion</span><span class=p>:</span><span class=w> </span><span class=l>storage.k8s.io/v1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>kind</span><span class=p>:</span><span class=w> </span><span class=l>StorageClass</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-ssd</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>provisioner</span><span class=p>:</span><span class=w> </span><span class=l>diskplugin.csi.alibabacloud.com</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>parameters</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>type</span><span class=p>:</span><span class=w> </span><span class=l>cloud_essd</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>performanceLevel</span><span class=p>:</span><span class=w> </span><span class=l>PL1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>fsType</span><span class=p>:</span><span class=w> </span><span class=l>ext4</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>reclaimPolicy</span><span class=p>:</span><span class=w> </span><span class=l>Retain</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>volumeBindingMode</span><span class=p>:</span><span class=w> </span><span class=l>WaitForFirstConsumer</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>allowVolumeExpansion</span><span class=p>:</span><span class=w> </span><span class=kc>true</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p><code>reclaimPolicy: Retain</code> 是为了防止 PVC 误删导致 commitlog 丢失——这是我在第一次演练 K8s 部署时差点踩的坑,后来强制写入规范。</p><h3 id=62-nameserver-部署>6.2 NameServer 部署</h3><p>NameServer 无状态、内存级注册中心,只跑 2 副本(P99 RT 1.2ms,2 副本足够扛 8 万 QPS 元数据查询)。</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span><span class=lnt>36
+</span><span class=lnt>37
+</span><span class=lnt>38
+</span><span class=lnt>39
+</span><span class=lnt>40
+</span><span class=lnt>41
+</span><span class=lnt>42
+</span><span class=lnt>43
+</span><span class=lnt>44
+</span><span class=lnt>45
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>apiVersion</span><span class=p>:</span><span class=w> </span><span class=l>apps/v1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>kind</span><span class=p>:</span><span class=w> </span><span class=l>Deployment</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-nameserver</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>namespace</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>replicas</span><span class=p>:</span><span class=w> </span><span class=m>2</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>selector</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>matchLabels</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>app</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-nameserver }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>template</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>labels</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>app</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-nameserver }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>containers</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>nameserver</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>image</span><span class=p>:</span><span class=w> </span><span class=l>apache/rocketmq:5.3.0</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>command</span><span class=p>:</span><span class=w> </span><span class=p>[</span><span class=s2>&#34;sh&#34;</span><span class=p>,</span><span class=w> </span><span class=s2>&#34;mqnamesrv&#34;</span><span class=p>]</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>ports</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- <span class=nt>containerPort</span><span class=p>:</span><span class=w> </span><span class=m>9876</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>env</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>JAVA_OPT_EXT</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>value</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;-Xms2g -Xmx2g -Xmn1g&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>resources</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>requests</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>cpu</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;500m&#34;</span><span class=nt>, memory</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;2Gi&#34;</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>limits</span><span class=p>:</span><span class=w>   </span>{<span class=w> </span><span class=nt>cpu</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;2&#34;</span><span class=nt>,    memory</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;4Gi&#34;</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>livenessProbe</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>tcpSocket</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>port</span><span class=p>:</span><span class=w> </span><span class=m>9876</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>initialDelaySeconds</span><span class=p>:</span><span class=w> </span><span class=m>30</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>periodSeconds</span><span class=p>:</span><span class=w> </span><span class=m>10</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>readinessProbe</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>tcpSocket</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>port</span><span class=p>:</span><span class=w> </span><span class=m>9876</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>initialDelaySeconds</span><span class=p>:</span><span class=w> </span><span class=m>15</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>periodSeconds</span><span class=p>:</span><span class=w> </span><span class=m>5</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nn>---</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>apiVersion</span><span class=p>:</span><span class=w> </span><span class=l>v1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>kind</span><span class=p>:</span><span class=w> </span><span class=l>Service</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-nameserver</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>namespace</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>selector</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>app</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-nameserver }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>ports</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span>- <span class=nt>port</span><span class=p>:</span><span class=w> </span><span class=m>9876</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>targetPort</span><span class=p>:</span><span class=w> </span><span class=m>9876</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>type</span><span class=p>:</span><span class=w> </span><span class=l>ClusterIP</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><h3 id=63-broker-部署statefulset--dledger>6.3 Broker 部署(StatefulSet + Dledger)</h3><p>Broker 是有状态的(commitlog 持久化),必须用 StatefulSet,3 副本组成 Dledger Raft 组(N=3 容忍 1 节点宕机)。每个 Pod 挂 100Gi PVC 存储 commitlog/consumequeue/index。</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span><span class=lnt>36
+</span><span class=lnt>37
+</span><span class=lnt>38
+</span><span class=lnt>39
+</span><span class=lnt>40
+</span><span class=lnt>41
+</span><span class=lnt>42
+</span><span class=lnt>43
+</span><span class=lnt>44
+</span><span class=lnt>45
+</span><span class=lnt>46
+</span><span class=lnt>47
+</span><span class=lnt>48
+</span><span class=lnt>49
+</span><span class=lnt>50
+</span><span class=lnt>51
+</span><span class=lnt>52
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>apiVersion</span><span class=p>:</span><span class=w> </span><span class=l>apps/v1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>kind</span><span class=p>:</span><span class=w> </span><span class=l>StatefulSet</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-broker</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>namespace</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>serviceName</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-broker-headless</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>replicas</span><span class=p>:</span><span class=w> </span><span class=m>3</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>selector</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>matchLabels</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>app</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-broker }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>template</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>labels</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>app</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-broker }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>containers</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>broker</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>image</span><span class=p>:</span><span class=w> </span><span class=l>apache/rocketmq:5.3.0</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>command</span><span class=p>:</span><span class=w> </span><span class=p>[</span><span class=s2>&#34;sh&#34;</span><span class=p>,</span><span class=w> </span><span class=s2>&#34;mqbroker&#34;</span><span class=p>,</span><span class=w> </span><span class=s2>&#34;-c&#34;</span><span class=p>,</span><span class=w> </span><span class=s2>&#34;/etc/rocketmq/broker.conf&#34;</span><span class=p>]</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>ports</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- {<span class=w> </span><span class=nt>containerPort: 10909, name</span><span class=p>:</span><span class=w> </span><span class=l>vip }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- {<span class=w> </span><span class=nt>containerPort: 10911, name</span><span class=p>:</span><span class=w> </span><span class=l>broker }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- {<span class=w> </span><span class=nt>containerPort: 10912, name</span><span class=p>:</span><span class=w> </span><span class=l>ha }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>env</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>NAMESRV_ADDR</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>value</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;rocketmq-nameserver:9876&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>JAVA_OPT_EXT</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>value</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;-Xms8g -Xmx8g -Xmn4g -XX:+UseG1GC&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>resources</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>requests</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>cpu</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;2&#34;</span><span class=nt>, memory</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;10Gi&#34;</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>limits</span><span class=p>:</span><span class=w>   </span>{<span class=w> </span><span class=nt>cpu</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;8&#34;</span><span class=nt>, memory</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;16Gi&#34;</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>volumeMounts</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- {<span class=w> </span><span class=nt>name: store, mountPath</span><span class=p>:</span><span class=w> </span><span class=l>/home/rocketmq/store }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- {<span class=w> </span><span class=nt>name: conf,  mountPath</span><span class=p>:</span><span class=w> </span><span class=l>/etc/rocketmq }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>livenessProbe</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>tcpSocket</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>port</span><span class=p>:</span><span class=w> </span><span class=m>10911</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>initialDelaySeconds</span><span class=p>:</span><span class=w> </span><span class=m>90</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>periodSeconds</span><span class=p>:</span><span class=w> </span><span class=m>15</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>failureThreshold</span><span class=p>:</span><span class=w> </span><span class=m>4</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>readinessProbe</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>tcpSocket</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>port</span><span class=p>:</span><span class=w> </span><span class=m>10911</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>initialDelaySeconds</span><span class=p>:</span><span class=w> </span><span class=m>60</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>periodSeconds</span><span class=p>:</span><span class=w> </span><span class=m>10</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>volumes</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>conf</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>configMap</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-broker-conf }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>volumeClaimTemplates</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span>- <span class=nt>metadata</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>store }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>accessModes</span><span class=p>:</span><span class=w> </span><span class=p>[</span><span class=w> </span><span class=s2>&#34;ReadWriteOnce&#34;</span><span class=w> </span><span class=p>]</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>storageClassName</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-ssd</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>resources</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>requests</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>storage</span><span class=p>:</span><span class=w> </span><span class=l>100Gi }</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>Dledger 关键配置(挂在 ConfigMap <code>rocketmq-broker-conf</code> 里):</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span><span class=lnt>7
+</span><span class=lnt>8
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-properties data-lang=properties><span class=line><span class=cl><span class=na>brokerClusterName</span><span class=o>=</span><span class=s>DefaultCluster</span>
+</span></span><span class=line><span class=cl><span class=na>brokerName</span><span class=o>=</span><span class=s>broker-dledger-1</span>
+</span></span><span class=line><span class=cl><span class=na>enableDLegerCommitLog</span><span class=o>=</span><span class=s>true</span>
+</span></span><span class=line><span class=cl><span class=na>dLegerGroup</span><span class=o>=</span><span class=s>broker-dledger-1</span>
+</span></span><span class=line><span class=cl><span class=na>dLegerPeers</span><span class=o>=</span><span class=s>n0-rocketmq-broker-0.rocketmq-broker-headless:40911;n1-rocketmq-broker-1.rocketmq-broker-headless:40911;n2-rocketmq-broker-2.rocketmq-broker-headless:40911</span>
+</span></span><span class=line><span class=cl><span class=na>dLegerSelfId</span><span class=o>=</span><span class=s>n0</span>
+</span></span><span class=line><span class=cl><span class=na>storePathRootDir</span><span class=o>=</span><span class=s>/home/rocketmq/store</span>
+</span></span><span class=line><span class=cl><span class=na>flushDiskType</span><span class=o>=</span><span class=s>SYNC_FLUSH</span>
+</span></span></code></pre></td></tr></table></div></div><p><code>livenessProbe.initialDelaySeconds=90</code> 是我们踩过坑算出来的——broker 启动要先把 commitlog 索引 mmap 到内存,集群有 30GB 历史数据时,启动耗时实测 78s,延迟探针小于 90s 就会被反复 kill。</p><h3 id=64-proxy-部署5x-grpc-接入层>6.4 Proxy 部署(5.x gRPC 接入层)</h3><p>RocketMQ 5.x 引入 Proxy 层,把 gRPC 协议转换成 Remoting,客户端不再直连 Broker。无状态、横向扩展。</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span><span class=lnt>36
+</span><span class=lnt>37
+</span><span class=lnt>38
+</span><span class=lnt>39
+</span><span class=lnt>40
+</span><span class=lnt>41
+</span><span class=lnt>42
+</span><span class=lnt>43
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>apiVersion</span><span class=p>:</span><span class=w> </span><span class=l>apps/v1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>kind</span><span class=p>:</span><span class=w> </span><span class=l>Deployment</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-proxy</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>namespace</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>replicas</span><span class=p>:</span><span class=w> </span><span class=m>2</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>selector</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>matchLabels</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>app</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-proxy }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>template</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>labels</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>app</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-proxy }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>containers</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>proxy</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>image</span><span class=p>:</span><span class=w> </span><span class=l>apache/rocketmq:5.3.0</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>command</span><span class=p>:</span><span class=w> </span><span class=p>[</span><span class=s2>&#34;sh&#34;</span><span class=p>,</span><span class=w> </span><span class=s2>&#34;mqproxy&#34;</span><span class=p>,</span><span class=w> </span><span class=s2>&#34;-n&#34;</span><span class=p>,</span><span class=w> </span><span class=s2>&#34;rocketmq-nameserver:9876&#34;</span><span class=p>]</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>ports</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- {<span class=w> </span><span class=nt>containerPort: 8080, name</span><span class=p>:</span><span class=w> </span><span class=l>remoting }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- {<span class=w> </span><span class=nt>containerPort: 8081, name</span><span class=p>:</span><span class=w> </span><span class=l>grpc }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>resources</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>requests</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>cpu</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;1&#34;</span><span class=nt>, memory</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;4Gi&#34;</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>limits</span><span class=p>:</span><span class=w>   </span>{<span class=w> </span><span class=nt>cpu</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;4&#34;</span><span class=nt>, memory</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;8Gi&#34;</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>livenessProbe</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>tcpSocket</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>port</span><span class=p>:</span><span class=w> </span><span class=m>8081</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>initialDelaySeconds</span><span class=p>:</span><span class=w> </span><span class=m>45</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>periodSeconds</span><span class=p>:</span><span class=w> </span><span class=m>10</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>readinessProbe</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>tcpSocket</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>port</span><span class=p>:</span><span class=w> </span><span class=m>8081</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>initialDelaySeconds</span><span class=p>:</span><span class=w> </span><span class=m>30</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>periodSeconds</span><span class=p>:</span><span class=w> </span><span class=m>5</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nn>---</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>apiVersion</span><span class=p>:</span><span class=w> </span><span class=l>v1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>kind</span><span class=p>:</span><span class=w> </span><span class=l>Service</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-proxy</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>namespace</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>selector</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>app</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-proxy }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>ports</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span>- {<span class=w> </span><span class=nt>name: remoting, port</span><span class=p>:</span><span class=w> </span><span class=m>8080</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span>- {<span class=w> </span><span class=nt>name: grpc,     port</span><span class=p>:</span><span class=w> </span><span class=m>8081</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>type</span><span class=p>:</span><span class=w> </span><span class=l>ClusterIP</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><h3 id=65-controller-部署自动选主>6.5 Controller 部署(自动选主)</h3><p>Controller 是 5.x 新组件,负责在 Master 宕机时把 Slave 自动切为 Master(SwitchPriority/CheckSyncStateSet 协议),把切换 RTO 从原先 30+s 压到 8s 内。我们生产部 3 节点 StatefulSet 形成 Raft 组。</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span><span class=lnt>28
+</span><span class=lnt>29
+</span><span class=lnt>30
+</span><span class=lnt>31
+</span><span class=lnt>32
+</span><span class=lnt>33
+</span><span class=lnt>34
+</span><span class=lnt>35
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>apiVersion</span><span class=p>:</span><span class=w> </span><span class=l>apps/v1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>kind</span><span class=p>:</span><span class=w> </span><span class=l>StatefulSet</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-controller</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>namespace</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>serviceName</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-controller-headless</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>replicas</span><span class=p>:</span><span class=w> </span><span class=m>3</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>selector</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>matchLabels</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>app</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-controller }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>template</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>labels</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>app</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-controller }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>containers</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>controller</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>image</span><span class=p>:</span><span class=w> </span><span class=l>apache/rocketmq:5.3.0</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>command</span><span class=p>:</span><span class=w> </span><span class=p>[</span><span class=s2>&#34;sh&#34;</span><span class=p>,</span><span class=w> </span><span class=s2>&#34;mqcontroller&#34;</span><span class=p>,</span><span class=w> </span><span class=s2>&#34;-c&#34;</span><span class=p>,</span><span class=w> </span><span class=s2>&#34;/etc/rocketmq/controller.conf&#34;</span><span class=p>]</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>ports</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- {<span class=w> </span><span class=nt>containerPort</span><span class=p>:</span><span class=w> </span><span class=m>9878</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>resources</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>requests</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>cpu</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;500m&#34;</span><span class=nt>, memory</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;2Gi&#34;</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>limits</span><span class=p>:</span><span class=w>   </span>{<span class=w> </span><span class=nt>cpu</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;2&#34;</span><span class=nt>,    memory</span><span class=p>:</span><span class=w> </span><span class=s2>&#34;4Gi&#34;</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>livenessProbe</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>tcpSocket</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>port</span><span class=p>:</span><span class=w> </span><span class=m>9878</span><span class=w> </span>}<span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>initialDelaySeconds</span><span class=p>:</span><span class=w> </span><span class=m>30</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>periodSeconds</span><span class=p>:</span><span class=w> </span><span class=m>10</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>volumeMounts</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span>- {<span class=w> </span><span class=nt>name: data, mountPath</span><span class=p>:</span><span class=w> </span><span class=l>/home/rocketmq/controller }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>volumeClaimTemplates</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span>- <span class=nt>metadata</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>data }</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>accessModes</span><span class=p>:</span><span class=w> </span><span class=p>[</span><span class=w> </span><span class=s2>&#34;ReadWriteOnce&#34;</span><span class=w> </span><span class=p>]</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>storageClassName</span><span class=p>:</span><span class=w> </span><span class=l>rocketmq-ssd</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>resources</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>requests</span><span class=p>:</span><span class=w> </span>{<span class=w> </span><span class=nt>storage</span><span class=p>:</span><span class=w> </span><span class=l>10Gi } }</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><h3 id=部署后验证>部署后验证</h3><p>我们标准化的上线 checklist 一共 3 步,<strong>任一失败立即回滚</strong>:</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># 1. 所有 Pod Running 且 Ready</span>
+</span></span><span class=line><span class=cl>kubectl -n rocketmq get pod -o wide
+</span></span><span class=line><span class=cl><span class=c1># 预期:nameserver 2/2、broker 3/3、proxy 2/2、controller 3/3 均 1/1 Running</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 2. 集群拓扑列表(Master/Slave 角色 + Dledger 主从)</span>
+</span></span><span class=line><span class=cl>kubectl -n rocketmq <span class=nb>exec</span> rocketmq-broker-0 -- sh mqadmin clusterList -n rocketmq-nameserver:9876
+</span></span><span class=line><span class=cl><span class=c1># 预期:看到 3 个 Master,BID=0,InSyncReplicas=3</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 3. 创建测试 Topic 并验证消息收发</span>
+</span></span><span class=line><span class=cl>kubectl -n rocketmq <span class=nb>exec</span> rocketmq-broker-0 -- sh mqadmin updateTopic <span class=se>\
+</span></span></span><span class=line><span class=cl>  -n rocketmq-nameserver:9876 -c DefaultCluster -t TestTopic -r <span class=m>8</span> -w <span class=m>8</span>
+</span></span><span class=line><span class=cl><span class=c1># 预期:8 读 8 写队列分配到 3 个 broker,无 ERROR 返回</span>
+</span></span></code></pre></td></tr></table></div></div><p>我们生产环境跑完这套流程总耗时约 9 分钟(冷启动),其中 broker 启动占 6 分钟(commitlog mmap)。验证全过后挂 Grafana 看 TPS/RT/堆积曲线,稳定 30 分钟才算正式接管流量。</p><h2 id=章节-7可靠性保证>章节 7:可靠性保证</h2><p>可靠性是消息队列的命门。生产上消息丢一条、重复一条、顺序错一条都可能是事故级问题。2025 年我们做了一次大促压测,百万级订单消息零丢失、零重复、零错序,关键就是下面这三板斧。</p><h3 id=71-不丢同步刷盘--主从同步>7.1 不丢:同步刷盘 + 主从同步</h3><p>RocketMQ 默认的刷盘策略是 <code>ASYNC_FLUSH</code>(异步刷盘),Master 收到消息后立即返回 Producer 成功,后台线程再批量刷盘。这种模式吞吐高但有数据丢失风险——如果 Master 刷盘前宕机,内存里的消息就丢了。</p><p>生产环境我坚持用 <code>flushDiskType=SYNC_FLUSH</code> + <code>brokerRole=SYNC_MASTER</code> 双保险:</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=c># broker.conf 核心配置</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=l>brokerClusterName=DefaultCluster</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=l>brokerName=broker-a</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=l>brokerId=0</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=c># 同步刷盘:消息写入 CommitLog 后才返回 Producer 成功</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=l>flushDiskType=SYNC_FLUSH</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=c># 同步双写:Master 等 Slave 同步刷盘成功才返回成功</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=l>brokerRole=SYNC_MASTER</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=c># 主从异步复制会让 Slave 落后 Master 50-200ms</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=c># 同步复制 SLA 99.99%,但吞吐下降 30%</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>实测下来:同步刷盘单机 TPS 从 8 万降到 5.5 万,但 5 万 QPS 峰值对我们完全够用(实际打满到 4.2 万)。代价是磁盘 IO 翻倍,SSD 必须用 NVMe,普通云盘 3000 IOPS 撑不住。</p><h3 id=72-不重幂等消费的-3-种武器>7.2 不重:幂等消费的 3 种武器</h3><p>RocketMQ 的 <code>at-least-once</code> 语义决定了:消费端一定会收到消息,但可能收到多次(网络重试、Consumer 宕机重启、位点回退)。我们项目最终选了 Redis 去重表 + Lua 脚本,原因是:</p><div class=table-wrapper><table><thead><tr><th>方案</th><th>性能</th><th>复杂度</th><th>适用场景</th></tr></thead><tbody><tr><td>数据库唯一索引</td><td>低(每次 INSERT)</td><td>低</td><td>订单创建等强一致场景</td></tr><tr><td>Redis SETNX 去重</td><td>高(单次 Redis 写)</td><td>中</td><td>高 QPS 业务,我们用的</td></tr><tr><td>业务状态机</td><td>最高(无 IO)</td><td>高</td><td>状态流转场景</td></tr></tbody></table></div><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=c1>// Redis 去重表 + Lua 原子写入</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kd>public</span><span class=w> </span><span class=kd>class</span> <span class=nc>RedisIdempotentChecker</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>private</span><span class=w> </span><span class=kd>static</span><span class=w> </span><span class=kd>final</span><span class=w> </span><span class=n>String</span><span class=w> </span><span class=n>LUA_SCRIPT</span><span class=w> </span><span class=o>=</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=s>&#34;if redis.call(&#39;SETNX&#39;, KEYS[1], &#39;1&#39;) then &#34;</span><span class=w> </span><span class=o>+</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=s>&#34;  return redis.call(&#39;EXPIRE&#39;, KEYS[1], 86400) &#34;</span><span class=w> </span><span class=o>+</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=s>&#34;else return 0 end&#34;</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=kt>boolean</span><span class=w> </span><span class=nf>isProcessed</span><span class=p>(</span><span class=n>String</span><span class=w> </span><span class=n>msgId</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>Long</span><span class=w> </span><span class=n>result</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>redisTemplate</span><span class=p>.</span><span class=na>execute</span><span class=p>(</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>new</span><span class=w> </span><span class=n>DefaultRedisScript</span><span class=o>&lt;&gt;</span><span class=p>(</span><span class=n>LUA_SCRIPT</span><span class=p>,</span><span class=w> </span><span class=n>Long</span><span class=p>.</span><span class=na>class</span><span class=p>),</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>List</span><span class=p>.</span><span class=na>of</span><span class=p>(</span><span class=s>&#34;mq:processed:&#34;</span><span class=w> </span><span class=o>+</span><span class=w> </span><span class=n>msgId</span><span class=p>)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>return</span><span class=w> </span><span class=n>result</span><span class=w> </span><span class=o>==</span><span class=w> </span><span class=kc>null</span><span class=w> </span><span class=o>||</span><span class=w> </span><span class=n>result</span><span class=w> </span><span class=o>==</span><span class=w> </span><span class=n>0</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>}</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>消费侧三步走:先查 Redis 判重 → 没处理过则执行业务 → 业务失败时回滚 Redis 标记位。我们项目实测 Redis 判重 99.99% 命中率,单条消息处理耗时增加 0.8ms,完全可接受。</p><h3 id=73-有序全局有序-vs-分区有序>7.3 有序:全局有序 vs 分区有序</h3><p>RocketMQ 的有序是<strong>队列级别</strong>的,单个队列内严格 FIFO。订单创建→支付→发货必须保证同一订单的消息进同一队列,这靠 <code>partitionKey</code>:</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span><span class=lnt>7
+</span><span class=lnt>8
+</span><span class=lnt>9
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>spring</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>cloud</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>stream</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>rocketmq</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>bindings</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>output</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=nt>producer</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=c># 同一 orderId 的消息路由到同一 Queue</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>messageQueueSelector</span><span class=p>:</span><span class=w> </span><span class=l>orderIdHashSelector</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><ul><li><strong>全局有序</strong>:1 个 Topic 1 个 Queue,吞吐上限单机约 5 万 TPS(我们没采用,代价太大)</li><li><strong>分区有序</strong>:4 个队列按 <code>orderId % 4</code> 路由,同一订单消息聚集到同一队列,实测峰值 4.5 万 TPS,完全够用</li></ul><p>代价是:<strong>消费并行度被队列数锁死</strong>。4 个队列最多 4 个 Consumer 实例并行消费,所以队列数要谨慎评估,太少吞吐不够,太多运维复杂。</p><hr><h2 id=章节-8消息积压应急>章节 8:消息积压应急</h2><p>大促过后最怕的事:消费者跟不上,RocketMQ 队列里堆了上千万条消息。我们项目 2024 年双 11 后第一小时就遇到了——告警短信连发 200 条,Lag 飙到 800 万。</p><h3 id=监控三大黄金指标>监控:三大黄金指标</h3><p>Grafana 面板三件套(基于 RocketMQ-exporter 抓取):</p><div class=table-wrapper><table><thead><tr><th>指标</th><th>含义</th><th>预警阈值</th></tr></thead><tbody><tr><td><code>rocketmq_consumer_lag</code></td><td>消费位点落后最大值</td><td>> 10 万</td></tr><tr><td><code>rocketmq_consumer_tps</code></td><td>消费 TPS</td><td>&lt; 100(基线 800)</td></tr><tr><td><code>rocketmq_producer_tps</code></td><td>生产 TPS</td><td>突增 3 倍</td></tr></tbody></table></div><p>实测我们项目基线:生产 TPS 1200、消费 TPS 950,Lag 稳定在 5 万以内。Lag 突破 10 万必然有问题。</p><h3 id=排查四象限>排查四象限</h3><p>应急先定位根因,再动手:</p><ol><li><strong>消费者宕机</strong>:<code>kubectl get pod</code> 看 Consumer 实例,某节点 OOM 就绪失败是最常见</li><li><strong>消费慢</strong>:JVM Full GC、慢 SQL、第三方接口超时——<code>arthas trace</code> 抓链路</li><li><strong>生产突增</strong>:大促/数据导入/对账任务,生产端 3 倍突增时正常</li><li><strong>路由错配</strong>:<code>orderId % 4</code> 后某队列全是大订单,出现单队列倾斜</li></ol><h3 id=应急三板斧>应急三板斧</h3><p>按代价从小到大:</p><p><strong>第一板斧:临时扩容 Consumer 实例</strong></p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># K8s 快速扩容(平时 3 个副本,临时到 12 个)</span>
+</span></span><span class=line><span class=cl>kubectl scale deployment notification-consumer --replicas<span class=o>=</span><span class=m>12</span>
+</span></span><span class=line><span class=cl><span class=c1># 队列数锁死了并行度上限,扩到队列数=4 时已无意义</span>
+</span></span><span class=line><span class=cl><span class=c1># 4 个队列,扩 4 个以上实例不会提升吞吐</span>
+</span></span></code></pre></td></tr></table></div></div><p><strong>第二板斧:批量消费</strong></p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>spring</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>cloud</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>stream</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>rocketmq</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=nt>bindings</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>          </span><span class=nt>input</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=nt>consumer</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=c># 默认单条拉取,改批量</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>pullBatchSize</span><span class=p>:</span><span class=w> </span><span class=m>1000</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>              </span><span class=nt>consumeMessageBatchMaxSize</span><span class=p>:</span><span class=w> </span><span class=m>1000</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>批量消费 TPS 从 800 飙到 4500,但要注意:批量内一条失败会<strong>整批重试</strong>,要做好单条异常隔离。</p><p><strong>第三板斧:降级非核心消费者</strong>
+订单/支付核心链路:保 100% 吞吐
+通知/统计/日志链路:暂时关掉,等核心消化完再开
+通知服务降级:直接走 HTTP 同步调用,代价是接口慢 200ms</p><p>我们 2024 双 11 实战:扩容到 6 个 Consumer + 批量改 1000 + 关闭统计消费者,Lag 从 800 万降到 5 万以内只用了 1.5 小时。</p><hr><h2 id=章节-9进阶特性>章节 9:进阶特性</h2><p>RocketMQ 5.x 有四个进阶特性,踩过的坑换来的经验。</p><h3 id=91-事务消息>9.1 事务消息</h3><p>订单创建需要同时落 DB 和发 MQ,本地事务 + MQ 要么都成功要么都失败,这就是分布式事务。RocketMQ 的事务消息分两阶段:</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span><span class=lnt>22
+</span><span class=lnt>23
+</span><span class=lnt>24
+</span><span class=lnt>25
+</span><span class=lnt>26
+</span><span class=lnt>27
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=c1>// 第一阶段:发送半消息(Half Message),对消费者不可见</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>rocketMQTemplate</span><span class=p>.</span><span class=na>sendMessageInTransaction</span><span class=p>(</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=s>&#34;order-tx-topic&#34;</span><span class=p>,</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>MessageBuilder</span><span class=p>.</span><span class=na>withPayload</span><span class=p>(</span><span class=n>order</span><span class=p>).</span><span class=na>build</span><span class=p>(),</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>order</span><span class=w>  </span><span class=c1>// 业务参数,传递给本地事务检查器</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=c1>// 本地事务检查器 - 第二阶段</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nd>@RocketMQTransactionListener</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=kd>public</span><span class=w> </span><span class=kd>class</span> <span class=nc>OrderTxListener</span><span class=w> </span><span class=kd>implements</span><span class=w> </span><span class=n>RocketMQLocalTransactionListener</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Override</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=n>LocalTransactionState</span><span class=w> </span><span class=nf>executeLocalTransaction</span><span class=p>(</span><span class=n>Message</span><span class=w> </span><span class=n>msg</span><span class=p>,</span><span class=w> </span><span class=n>Object</span><span class=w> </span><span class=n>arg</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>try</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=n>orderService</span><span class=p>.</span><span class=na>createOrder</span><span class=p>((</span><span class=n>Order</span><span class=p>)</span><span class=w> </span><span class=n>arg</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>return</span><span class=w> </span><span class=n>LocalTransactionState</span><span class=p>.</span><span class=na>COMMIT_MESSAGE</span><span class=p>;</span><span class=w>  </span><span class=c1>// 提交</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w> </span><span class=k>catch</span><span class=w> </span><span class=p>(</span><span class=n>Exception</span><span class=w> </span><span class=n>e</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>            </span><span class=k>return</span><span class=w> </span><span class=n>LocalTransactionState</span><span class=p>.</span><span class=na>ROLLBACK_MESSAGE</span><span class=p>;</span><span class=w>  </span><span class=c1>// 回滚</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Override</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=n>LocalTransactionState</span><span class=w> </span><span class=nf>checkLocalTransaction</span><span class=p>(</span><span class=n>MessageExt</span><span class=w> </span><span class=n>msg</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=c1>// MQ Broker 端反查:60s 还没收到 COMMIT/ROLLBACK 就回调这里</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=n>Order</span><span class=w> </span><span class=n>order</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>orderService</span><span class=p>.</span><span class=na>findById</span><span class=p>(</span><span class=n>msg</span><span class=p>.</span><span class=na>getKeys</span><span class=p>());</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>return</span><span class=w> </span><span class=n>order</span><span class=w> </span><span class=o>!=</span><span class=w> </span><span class=kc>null</span><span class=w> </span><span class=o>?</span><span class=w> </span><span class=n>COMMIT_MESSAGE</span><span class=w> </span><span class=p>:</span><span class=w> </span><span class=n>ROLLBACK_MESSAGE</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>}</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>注意:<strong>Half Message 在事务检查器返回前对消费者不可见</strong>,反查默认 60s 一次,最多 5 次。我们项目踩过坑:有次本地事务卡了 5 分钟,反查 5 次后 RocketMQ 直接当成 UNKNOWN 状态丢弃,最后靠人工补单捞回来。</p><h3 id=92-顺序消息>9.2 顺序消息</h3><p>订单状态机:已创建→已支付→已发货,顺序错一格就出乱子。</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=n>rocketMQTemplate</span><span class=p>.</span><span class=na>syncSendOrderly</span><span class=p>(</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=s>&#34;order-status-topic&#34;</span><span class=p>,</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>MessageBuilder</span><span class=p>.</span><span class=na>withPayload</span><span class=p>(</span><span class=n>status</span><span class=p>).</span><span class=na>build</span><span class=p>(),</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>orderId</span><span class=p>,</span><span class=w>  </span><span class=c1>// hashKey,相同 orderId 进同一队列</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>3000</span><span class=w>      </span><span class=c1>// 超时</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>
+</span></span></span><span class=line><span class=cl><span class=c1>// 或用 MessageQueueSelector 自己控制</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>rocketMQTemplate</span><span class=p>.</span><span class=na>getProducer</span><span class=p>().</span><span class=na>send</span><span class=p>(</span><span class=n>msg</span><span class=p>,</span><span class=w> </span><span class=k>new</span><span class=w> </span><span class=n>MessageQueueSelector</span><span class=p>()</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nd>@Override</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=kd>public</span><span class=w> </span><span class=n>MessageQueue</span><span class=w> </span><span class=nf>select</span><span class=p>(</span><span class=n>List</span><span class=o>&lt;</span><span class=n>MessageQueue</span><span class=o>&gt;</span><span class=w> </span><span class=n>queues</span><span class=p>,</span><span class=w> </span><span class=n>Message</span><span class=w> </span><span class=n>msg</span><span class=p>,</span><span class=w> </span><span class=n>Object</span><span class=w> </span><span class=n>arg</span><span class=p>)</span><span class=w> </span><span class=p>{</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=kt>long</span><span class=w> </span><span class=n>orderId</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=p>(</span><span class=kt>long</span><span class=p>)</span><span class=w> </span><span class=n>arg</span><span class=p>;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=kt>int</span><span class=w> </span><span class=n>idx</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=p>(</span><span class=kt>int</span><span class=p>)</span><span class=w> </span><span class=p>(</span><span class=n>orderId</span><span class=w> </span><span class=o>%</span><span class=w> </span><span class=n>queues</span><span class=p>.</span><span class=na>size</span><span class=p>());</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>        </span><span class=k>return</span><span class=w> </span><span class=n>queues</span><span class=p>.</span><span class=na>get</span><span class=p>(</span><span class=n>idx</span><span class=p>);</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>}</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>},</span><span class=w> </span><span class=n>orderId</span><span class=p>);</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>代价:同一 orderId 的消息阻塞后续消费,<strong>单条消息处理耗时不能超过 30s</strong>(默认超时),否则顺序保证破功。我们把热点订单(直播秒杀)单独走普通消息,顺序消息留给状态变更这种低 QPS 但强顺序场景。</p><h3 id=93-延迟消息>9.3 延迟消息</h3><p>18 个固定级别(1s/5s/10s/30s/1m/2m/3m/4m/5m/6m/7m/8m/9m/10m/20m/30m/1h/2h),5.x 后支持任意秒级:</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=n>Message</span><span class=w> </span><span class=n>msg</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>MessageBuilder</span><span class=p>.</span><span class=na>withPayload</span><span class=p>(</span><span class=n>order</span><span class=p>)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>.</span><span class=na>setHeader</span><span class=p>(</span><span class=s>&#34;KEYS&#34;</span><span class=p>,</span><span class=w> </span><span class=n>orderId</span><span class=p>)</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=p>.</span><span class=na>build</span><span class=p>();</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>msg</span><span class=p>.</span><span class=na>setDelayTimeLevel</span><span class=p>(</span><span class=n>3</span><span class=p>);</span><span class=w>  </span><span class=c1>// 10 秒</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>rocketMQTemplate</span><span class=p>.</span><span class=na>getProducer</span><span class=p>().</span><span class=na>send</span><span class=p>(</span><span class=n>msg</span><span class=p>);</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p>实战场景:订单 30 分钟未支付自动取消(用 level 16,30m)、退款 7 天后自动到账提醒(用 level 18,2h)+ 业务自己定时扫表。<strong>注意</strong>:延迟消息一旦发送不能撤回,所以业务上要先判一次状态再发延迟消息,避免重复执行。</p><h3 id=94-消息回溯>9.4 消息回溯</h3><p>需求:把 3 天前的消息重新投递到消费端(数据修复、对账)。RocketMQ 5.x 的 pop API 实现了"无损回溯":</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span><span class=lnt>3
+</span><span class=lnt>4
+</span><span class=lnt>5
+</span><span class=lnt>6
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-java data-lang=java><span class=line><span class=cl><span class=c1>// 替代旧的 reconsumeLater,直接拉历史消息</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=n>List</span><span class=o>&lt;</span><span class=n>MessageExt</span><span class=o>&gt;</span><span class=w> </span><span class=n>messages</span><span class=w> </span><span class=o>=</span><span class=w> </span><span class=n>popConsumer</span><span class=p>.</span><span class=na>reconsumeFromTimestamp</span><span class=p>(</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=s>&#34;order-topic&#34;</span><span class=p>,</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>startTimestamp</span><span class=p>,</span><span class=w>  </span><span class=c1>// 3 天前的时间戳</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=n>1000</span><span class=w>             </span><span class=c1>// 最多 1000 条</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=p>);</span><span class=w>
+</span></span></span></code></pre></td></tr></table></div></div><p><strong>生产建议</strong>:回溯任务走独立 Consumer Group,不能跟在线消费混用,否则会乱位点。我们用 Canal 订阅 commitlog 同步到 MySQL 归档,长期回溯靠 ES 检索——直接走 RocketMQ 的 commitlog 检索,7 天前的消息已经清理掉,只能查归档库。这套机制在我们做财务对账时救过场,某天凌晨 1 亿条订单消息一次性重投,把线下对账从 4 小时压缩到 20 分钟。</p><h2 id=章节-10mq-在我们项目的演进>章节 10:MQ 在我们项目的演进</h2><h3 id=101-阶段一2023-q3-之前同步调用为主的重链路时代>10.1 阶段一(2023 Q3 之前):同步调用为主的"重链路"时代</h3><p>回看 2023 年之前的架构,30+ 微服务之间几乎全是 OpenFeign + Sentinel 同步调用。一次创建任务的接口,从网关 → 用户中心 → 租户中心 → 项目服务 → 任务服务 → 文档服务 → 通知服务,<strong>平均链路 6 跳</strong>,<strong>P95 延迟 450ms</strong>。最怕的是链路中任何一个下游服务抖动,整条调用链雪崩,更别提秒杀场景下 5 万 QPS 的冲击。Sentinel 的熔断虽然能兜底,但用户体验是"下单失败重试再失败"。这一年我开始琢磨:核心链路必须解耦,非核心链路必须异步。</p><h3 id=102-阶段二2023-q4rocketmq-5x-试点引入>10.2 阶段二(2023 Q4):RocketMQ 5.x 试点引入</h3><p>2023 年 10 月我们完成 RocketMQ 5.x 6 节点集群(3 Master + 3 Slave, Dledger 模式)上线。<strong>没有一刀切全量切换</strong>,而是按"非核心 → 半核心 → 核心"的顺序逐步迁移:第一批是通知服务(短信/邮件/站内信)、日志服务、审计服务这类<strong>丢一条不影响主流程</strong>的场景。这一阶段完成后,<strong>P95 延迟从 450ms 降至 280ms</strong>,链路平均跳数从 6 跳降至 3 跳。团队也借此摸清了消息幂等、顺序消息、消费位点回溯这些工程化能力。</p><h3 id=103-阶段三2024-全年eda-全量升级>10.3 阶段三(2024 全年):EDA 全量升级</h3><p>2024 年是 EDA(事件驱动架构)全面铺开的一年。我们把订单创建、库存扣减、支付回调、计费、出账这些核心链路全部事件化,30+ 微服务 100% 接入消息总线。配套做了 Seata 分布式事务改造,保证"本地事务 + 事务消息"双一致性。年终盘点:<strong>系统可用性从 99.9% 提升到 99.95%</strong>(月度故障时间从 43 分钟降至 21 分钟),<strong>日均事件吞吐突破 5000 万条</strong>,峰值 QPS 3.2 万。这一年也暴露了几个新问题:消息积压偶发、消费位点难追溯、跨服务事件链路看不清——倒逼出阶段四的可观测升级。</p><h3 id=104-阶段四2025-至今智能化可观测>10.4 阶段四(2025 至今):智能化可观测</h3><p>2025 年至今,我们围绕"事件可观测"做三件事:<strong>事件回放平台</strong>——任意 topic 任意时间段可重放,排查生产 bug 时不用再"提工单让测试造数据";<strong>消费位点智能告警</strong>——基于历史消费速率动态计算 lag 阈值,慢消费 5 分钟内告警,误报率压到 3% 以下;<strong>事件血缘追踪</strong>——消费端自动解析 event header 中的 source/timestamp/traceId,接入 SkyWalking,任意消息可反查完整调用链。<strong>当前数据</strong>:日均事件吞吐 8000 万条,峰值 QPS 5 万,系统可用性 99.97%。</p><div class=table-wrapper><table><thead><tr><th>阶段</th><th>时间</th><th>架构特征</th><th>链路跳数</th><th>P95</th><th>可用性</th></tr></thead><tbody><tr><td>一</td><td>2023 Q3 前</td><td>同步调用</td><td>6</td><td>450ms</td><td>99.9%</td></tr><tr><td>二</td><td>2023 Q4</td><td>MQ 试点</td><td>3</td><td>280ms</td><td>99.92%</td></tr><tr><td>三</td><td>2024</td><td>EDA 全量</td><td>2</td><td>180ms</td><td>99.95%</td></tr><tr><td>四</td><td>2025 至今</td><td>智能可观测</td><td>2</td><td>150ms</td><td>99.97%</td></tr></tbody></table></div><hr><h2 id=章节-11避坑指南12-个真实踩坑>章节 11:避坑指南:12 个真实踩坑</h2><p><strong>1. Topic 名拼写错误。</strong> 一次发版后,任务创建事件"消失"了 3 小时,排查发现 <code>task.created</code> 写成了 <code>task_created</code>,消费者订阅的是前者。<strong>解决</strong>:统一用 <code>Spring Cloud Stream</code> 的 <code>binding name</code> + 配置中心校验,禁止业务代码硬编码 topic。</p><p><strong>2. Consumer Group 重复。</strong> 两个团队都建了 <code>notification-service-consumer</code> group,导致消息被均分消费,部分通知漏发。<strong>解决</strong>:Consumer Group 命名按"服务-环境-业务域"三段式,如 <code>notification-service-prod-sms</code>,并接入 Nacos 配置中心统一登记。</p><p><strong>3. 顺序消息被 Hash 到不同队列。</strong> 我们用 <code>MessageQueueSelector</code> 按订单 ID 路由,结果同事改成了 <code>SelectMessageQueueByHash</code>,同一笔订单的"下单→支付→发货"事件被散到 3 个队列,顺序乱了。<strong>解决</strong>:顺序消息必须用自定义 selector + 业务键,<strong>禁用</strong> SDK 自带的 hash 策略。</p><p><strong>4. 事务消息未实现回查导致永久 Pending。</strong> 用 <code>TransactionListener</code> 只写了 <code>executeLocalTransaction</code>,忘了 <code>checkLocalTransaction</code>,本地事务回滚后 broker 永远查不到结果,消息一直 pending。<strong>解决</strong>:两个方法必须成对实现,回查逻辑要幂等且能反映本地事务最终状态。</p><p><strong>5. 延迟消息级别错配。</strong> 想发 5 分钟延迟,用了 <code>messageDelayLevel=3</code>(10 秒),超时 30 倍。<strong>解决</strong>:RocketMQ 默认支持 18 个固定延迟级别(1s/5s/10s/30s/1m/2m/3m/4m/5m&mldr;),<strong>不满足只能改 cron 定时投递</strong>,别硬凑级别。</p><p><strong>6. RocketMQ 5.x Controller 节点少于 3 选举失败。</strong> 我们一开始只部署 1 个 Controller 节点,重启时集群脑裂。<strong>解决</strong>:Controller 至少 3 节点(奇数),Raft 协议要求多数派存活才选举成功,K8s 部署必须配 <code>podAntiAffinity</code> 强制分散。</p><p><strong>7. Broker 磁盘满未告警。</strong> Broker 默认磁盘使用率超过 85% 才告警,线上 8 小时才有人发现,期间 200 万消息积压。<strong>解决</strong>:告警阈值改到 70%,<code>rocketmq-broker.yaml</code> 配 <code>diskMaxUsedSpaceRatio=70</code>,Prometheus 抓取 + Alertmanager 5 分钟内必须短信通知 SRE。</p><p><strong>8. 消费位点跳过了 RMW 死信队列。</strong> 重置位点时手动 <code>resetOffset</code> 把 offset 调到了最新,中间 3 小时的消息(含死信)全部丢失。<strong>解决</strong>:位点重置必须在 RocketMQ Console 上<strong>先查询再确认</strong>,并先在测试 topic 演练;生产环境禁止用 admin 客户端直接调 <code>resetOffset</code>。</p><p><strong>9. NameServer 单点故障。</strong> 早期只部署 1 个 NameServer Pod,K8s 滚动升级时短暂不可用,Producer 报 <code>No route info</code>。<strong>解决</strong>:NameServer 至少 2 节点(无状态,互不通信,增删节点无需重启),<code>addresses</code> 配置多个逗号分隔地址,客户端自动 failover。</p><p><strong>10. Producer 实例未关闭导致连接泄漏。</strong> 测试环境用 <code>new DefaultMQProducer()</code> 后没调 <code>shutdown()</code>,跑压测时连接数打满,Broker 报 <code>TooManyConnectionsException</code>。<strong>解决</strong>:Producer/Consumer 必须是单例(Spring 容器管理生命周期),加 <code>DisposableBean</code> 兜底关闭,或用 <code>try-with-resources</code>。</p><p><strong>11. Spring Cloud Stream 重试配置导致消息重复消费。</strong> 默认 <code>defaultRequeueRejected=true</code> + <code>retry.maxAttempts=3</code> + 未做幂等,网络抖动时一条消息被消费 3 次。<strong>解决</strong>:消费端必须实现幂等(用业务键 + Redis SETNX 或 DB 唯一索引),<code>requeueRejected</code> 改为 <code>false</code>(失败走死信队列人工处理)。</p><p><strong>12. Schema 演进不向后兼容。</strong> 上游给 <code>OrderEvent</code> 加了 <code>discountAmount</code> 字段(必填),下游老版本反序列化直接抛异常,消费积压 10 万。<strong>解决</strong>:Schema 演进遵循"加字段兼容、删字段不兼容、改类型不兼容",所有消息体加 <code>schemaVersion</code> 字段,消费端按版本走不同反序列化分支。</p><h2 id=章节-12总结与展望>章节 12:总结与展望</h2><p>RocketMQ 在我们项目里经历了"试点→全量→智能化"三步走,核心收益是链路解耦 + 异步提速 + 削峰抗量,<strong>P95 从 450ms 降至 150ms,可用性从 99.9% 提到 99.97%</strong>。展望未来,三个方向值得关注:<strong>Serverless MQ</strong>(阿里云 RocketMQ 5.x Serverless 按量付费,免运维,适合中小租户隔离场景);<strong>云原生 MQ</strong>(RocketMQ 5.x Operator 已 GA,K8s 上 Broker 弹性扩缩容、自动故障转移、配置热更新全部 YAML 化);<strong>5.x 新特性</strong>(Pop 消费模型把 Pull 长轮询改造成服务端推送,延迟降低 30%;Raft Controller 取代 DLedger,选主时间从 10s 降至 2s;Pull 消费模型给大数据团队更灵活的消费位点控制)。建议新项目直接上 5.x,老项目按 Controller → Pop → 弹性 顺序渐进升级。</p></section><footer class="article-meta article-footer"><section class=article-tags><a href=/tags/%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97/>消息队列</a>
+<a href=/tags/rocketmq/>RocketMQ</a>
+<a href=/tags/rabbitmq/>Rabbitmq</a>
+<a href=/tags/emqx/>EMQX</a>
+<a href=/tags/spring-cloud-stream/>Spring Cloud Stream</a>
+<a href=/tags/k8s%E9%83%A8%E7%BD%B2/>K8s部署</a></section><section class="article-copyright inline-meta"><svg class="icon icon-tabler icon-tabler-copyright" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z"/><circle cx="12" cy="12" r="9"/><path d="M14.5 9a3.5 4 0 100 6"/></svg>
+<span>本作品采用 CC BY-NC-SA 4.0 协议进行许可</span></section></footer><link rel=stylesheet href=https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css integrity=sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV crossorigin=anonymous><script src=https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js integrity=sha384-XjKyOOlGwcjNTAIQHIpgOno0Hl1YQqzUOEleOLALmuqehneUG+vnGctmUb0ZY0l8 crossorigin=anonymous defer></script><script src=https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js integrity=sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05 crossorigin=anonymous defer></script><script>window.addEventListener("DOMContentLoaded",()=>{const e=[".main-article",".widget--toc"];e.forEach(e=>{const t=document.querySelector(e);t&&renderMathInElement(t,{delimiters:[{left:"$$",right:"$$",display:!0},{left:"$",right:"$",display:!1},{left:"\\(",right:"\\)",display:!1},{left:"\\[",right:"\\]",display:!0}],ignoredClasses:["gist"]})})})</script></article><aside><h2 class=section-title>相关文章</h2><div class=subsection-list><div class=article-list--tile><article class=has-image><a href=/p/redis-mysql-shu-ju-tong-bu/><div class=article-image><img alt="Featured image of post Redis-MySQL 数据同步方案" height=150 loading=lazy src=/p/redis-mysql-shu-ju-tong-bu/image/cover_hu_3986a469c474472b.jpg srcset="/p/redis-mysql-shu-ju-tong-bu/image/cover_hu_3986a469c474472b.jpg 1x, /p/redis-mysql-shu-ju-tong-bu/image/cover_hu_315f831f542948ab.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#c4334480 0%,#1e1f3dC0 100%)"><h2 class=article-title>Redis-MySQL 数据同步方案</h2></div></a></article><article class=has-image><a href=/p/uml-jian-mo/><div class=article-image><img alt="Featured image of post UML 建模（用例图/时序图/协作图/三种模型）" height=150 loading=lazy src=/p/uml-jian-mo/image/cover_hu_4b346d23e988138c.jpg srcset="/p/uml-jian-mo/image/cover_hu_4b346d23e988138c.jpg 1x, /p/uml-jian-mo/image/cover_hu_a677a638a44069a.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#61acc880 0%,#0a1b35C0 100%)"><h2 class=article-title>UML 建模（用例图/时序图/协作图/三种模型）</h2></div></a></article><article class=has-image><a href=/p/fan-gui-fan-hua-she-ji/><div class=article-image><img alt="Featured image of post 数据库反规范化设计方法" height=150 loading=lazy src=/p/fan-gui-fan-hua-she-ji/image/cover_hu_873660cadda75476.jpg srcset="/p/fan-gui-fan-hua-she-ji/image/cover_hu_873660cadda75476.jpg 1x, /p/fan-gui-fan-hua-she-ji/image/cover_hu_5431a1f65ad78c3e.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#b9544580 0%,#2d1e3aC0 100%)"><h2 class=article-title>数据库反规范化设计方法</h2></div></a></article><article class=has-image><a href=/p/jia-gou-feng-ge-dui-bi/><div class=article-image><img alt="Featured image of post 软件架构风格对比 + 效用树答题套路" height=150 loading=lazy src=/p/jia-gou-feng-ge-dui-bi/image/cover_hu_d1b5be0002e9c9ce.jpg srcset="/p/jia-gou-feng-ge-dui-bi/image/cover_hu_d1b5be0002e9c9ce.jpg 1x, /p/jia-gou-feng-ge-dui-bi/image/cover_hu_ff10e63d2ca404de.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#bf3d4d80 0%,#152029C0 100%)"><h2 class=article-title>软件架构风格对比 + 效用树答题套路</h2></div></a></article><article class=has-image><a href=/p/fan-xiang-dai-li-liu-ju-tou-nei-wang-chuan-tou-shuang-xiong/><div class=article-image><img alt="Featured image of post 反向代理 6 巨头 + 内网穿透双雄：从 Nginx/Tengine 健康检查到全场景工具横评" height=150 loading=lazy src=/p/fan-xiang-dai-li-liu-ju-tou-nei-wang-chuan-tou-shuang-xiong/image/cover_hu_84455bf4d8693ffc.jpg srcset="/p/fan-xiang-dai-li-liu-ju-tou-nei-wang-chuan-tou-shuang-xiong/image/cover_hu_84455bf4d8693ffc.jpg 1x, /p/fan-xiang-dai-li-liu-ju-tou-nei-wang-chuan-tou-shuang-xiong/image/cover_hu_5750bf34cdaffd15.jpg 2x" width=250></div><div class=article-details style="background:linear-gradient(0deg,#688ed680 0%,#3b60a9C0 100%)"><h2 class=article-title>反向代理 6 巨头 + 内网穿透双雄：从 Nginx/Tengine 健康检查到全场景工具横评</h2></div></a></article></div></div></aside><script src=https://giscus.app/client.js data-repo=liangweidonggood/liangweidonggood.github.io data-repo-id="MDEwOlJlcG9zaXRvcnkxMDIzMzI5MjE=" data-category=Announcements data-category-id=DIC_kwDOBhl5-c4C-ZwO data-mapping=pathname data-strict=0 data-reactions-enabled=1 data-emit-metadata=0 data-input-position=bottom data-theme=light data-lang=zh-CN data-loading=lazy crossorigin=anonymous async></script><script>function setGiscusTheme(e){let t=document.querySelector("iframe.giscus-frame");t&&t.contentWindow.postMessage({giscus:{setConfig:{theme:e}}},"https://giscus.app")}(function(){addEventListener("message",t=>{if(event.origin!=="https://giscus.app")return;e()}),window.addEventListener("onColorSchemeChange",e);function e(){setGiscusTheme(document.documentElement.dataset.scheme==="light"?"light":"dark_dimmed")}})()</script><footer class=site-footer><section class=copyright>&copy;
+2006 -
+2026 Liangweidong's blog</section><section class=powerby>使用 <a href=https://gohugo.io/ target=_blank rel=noopener>Hugo</a> 构建<br>主题 <b><a href=https://github.com/CaiJimmy/hugo-theme-stack target=_blank rel=noopener data-version=4.0.3>Stack</a></b> 由 <a href=https://jimmycai.com target=_blank rel=noopener>Jimmy</a> 设计</section></footer><script type=module>
+    import gallery from '\/ts\/gallery.js';
+
+    const articleContent = document.querySelector('.article-content');
+    const shouldLoad = articleContent && (articleContent.querySelectorAll('figure').length > 0 || articleContent.querySelectorAll('img.gallery-image').length > 0);
+    
+    if (shouldLoad) {
+        gallery(articleContent);
+
+        const PhotoSwipeLightbox = (await import("https:\/\/cdn.jsdelivr.net\/npm\/photoswipe@5.4.4\/dist\/photoswipe-lightbox.esm.min.js")).default;
+        const styleHref = "https:\/\/cdn.jsdelivr.net\/npm\/photoswipe@5.4.4\/dist\/photoswipe.css";
+
+        const styleTag = document.createElement('link');
+        styleTag.rel = 'stylesheet';
+        styleTag.href = styleHref;
+        document.head.appendChild(styleTag);
+
+        const lightbox = new PhotoSwipeLightbox({
+            gallerySelector: '.article-content',
+            childSelector: 'figure a.image-link',
+            pswpModule: () => import("https:\/\/cdn.jsdelivr.net\/npm\/photoswipe@5.4.4\/dist\/photoswipe.esm.min.js")
+        });
+        lightbox.init();
+    }
+</script></main></div><script type=text/javascript src=/ts/main.f856840516f7c2ad1769a8f5937e3d08d6cb386e2cd2dd025ae696e0ff207958.js defer></script></body></html>
