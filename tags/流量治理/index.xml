@@ -1,0 +1,1252 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>流量治理 on Liangweidong's blog</title><link>https://liangweidonggood.github.io/tags/%E6%B5%81%E9%87%8F%E6%B2%BB%E7%90%86/</link><description>Recent content in 流量治理 on Liangweidong's blog</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Tue, 09 Jun 2026 00:00:00 +0000</lastBuildDate><atom:link href="https://liangweidonggood.github.io/tags/%E6%B5%81%E9%87%8F%E6%B2%BB%E7%90%86/index.xml" rel="self" type="application/rss+xml"/><item><title>服务熔断与限流：Sentinel 凭什么成为 Java 微服务的流量保险丝</title><link>https://liangweidonggood.github.io/p/sentinel-circuit-breaker-and-rate-limit/</link><pubDate>Tue, 09 Jun 2026 00:00:00 +0000</pubDate><guid>https://liangweidonggood.github.io/p/sentinel-circuit-breaker-and-rate-limit/</guid><description>&lt;img src="https://liangweidonggood.github.io/p/sentinel-circuit-breaker-and-rate-limit/image/cover.jpg" alt="Featured image of post 服务熔断与限流：Sentinel 凭什么成为 Java 微服务的流量保险丝" /&gt;&lt;h1 id="服务熔断与限流sentinel-凭什么成为-java-微服务的流量保险丝"&gt;服务熔断与限流：Sentinel 凭什么成为 Java 微服务的流量保险丝
+&lt;/h1&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;Java Web 微服务系列 · 第 7 篇 · 流量治理
+阅读时长：约 30 分钟
+本文写于 2026 年 6 月&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="引子一场被慢调用拖垮的秒杀"&gt;引子：一场被慢调用拖垮的秒杀
+&lt;/h2&gt;&lt;p&gt;2019 年某日 10 点整，国内某电商的限时秒杀活动开放。预热阶段一切平稳，QPS 稳定在 2 万，CPU 负载 40%。开抢瞬间，QPS 飙到 18 万、库存服务的下游 Redis 集群因为热点 key 出现单节点抖动，&lt;strong&gt;P99 响应时间从 50ms 涨到 800ms&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;接下来发生的事让 SRE 看得心惊：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;库存服务的线程池被慢调用占满，开始拒绝请求&lt;/li&gt;
+&lt;li&gt;订单服务等待库存超时，自己的线程池也开始耗尽&lt;/li&gt;
+&lt;li&gt;网关服务等待订单服务超时，请求堆积，&lt;strong&gt;连健康检查都开始失败&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;健康检查失败 → 网关被剔除 → 流量打到剩余节点 → 剩余节点更快被打挂&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;&lt;strong&gt;12 分钟后，整条链路上 80% 的服务节点处于&amp;quot;假死&amp;quot;状态&lt;/strong&gt;。研发紧急扩容 + 重启，又花了 30 分钟才把业务拉回来。事后复盘，技术总监盯着监控大盘说了一句：&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;&amp;ldquo;我们有限流、有熔断、有降级——三套组件，三种规则、三个控制台，&lt;strong&gt;真出事的时候没有一个生效&lt;/strong&gt;。&amp;rdquo;&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;p&gt;这就是&lt;strong&gt;雪崩&lt;/strong&gt;——单点慢调用引发的全链路死亡。它不是新问题，2012 年 Netflix 就因此开源了 Hystrix；2018 年阿里把双 11 的实战经验沉淀成 Sentinel；2019 年 Hystrix 进入维护模式后，Java 生态出现了 &lt;strong&gt;Resilience4j vs Sentinel&lt;/strong&gt; 的二分天下。&lt;/p&gt;
+&lt;p&gt;本文要回答两个问题：&lt;strong&gt;Java 微服务的流量治理工具，凭什么选 Sentinel？选了之后怎么真正用对？&lt;/strong&gt;&lt;/p&gt;
+&lt;h2 id="一核心概念把术语先掰开"&gt;一、核心概念：把术语先掰开
+&lt;/h2&gt;&lt;p&gt;谈具体工具前，先把&amp;quot;熔断 / 限流 / 降级 / 隔离&amp;quot;这四个常被混用的术语定义清楚——很多线上事故的根源是团队对术语的理解不一致。&lt;/p&gt;
+&lt;h3 id="11-四个术语的精准定义"&gt;1.1 四个术语的精准定义
+&lt;/h3&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;术语&lt;/th&gt;
+					&lt;th&gt;触发条件&lt;/th&gt;
+					&lt;th&gt;行为&lt;/th&gt;
+					&lt;th&gt;类比&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;限流&lt;/strong&gt;（Rate Limit）&lt;/td&gt;
+					&lt;td&gt;QPS / 并发数超过阈值&lt;/td&gt;
+					&lt;td&gt;拒绝多余请求&lt;/td&gt;
+					&lt;td&gt;银行排号机&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;熔断&lt;/strong&gt;（Circuit Break）&lt;/td&gt;
+					&lt;td&gt;下游错误率 / 慢调用比例超阈值&lt;/td&gt;
+					&lt;td&gt;短路下游调用，直接失败&lt;/td&gt;
+					&lt;td&gt;电闸跳闸&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;降级&lt;/strong&gt;（Fallback）&lt;/td&gt;
+					&lt;td&gt;主流程异常&lt;/td&gt;
+					&lt;td&gt;走兜底逻辑（缓存 / 默认值 / 异步）&lt;/td&gt;
+					&lt;td&gt;备用电源&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;隔离&lt;/strong&gt;（Bulkhead）&lt;/td&gt;
+					&lt;td&gt;始终生效&lt;/td&gt;
+					&lt;td&gt;不同业务用独立资源池，互不影响&lt;/td&gt;
+					&lt;td&gt;船舱隔间&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;💡 &lt;strong&gt;原理：四者的关系&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;这四个概念是&lt;strong&gt;互补&lt;/strong&gt;而不是替代：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;限流&lt;/strong&gt;保护&lt;strong&gt;自己&lt;/strong&gt;——拦在入口，不让下游压力来&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;熔断&lt;/strong&gt;保护&lt;strong&gt;自己&lt;/strong&gt;——拦在出口，不让下游故障传染过来&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;降级&lt;/strong&gt;保护&lt;strong&gt;用户体验&lt;/strong&gt;——主流程跪了还能给用户兜底响应&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;隔离&lt;/strong&gt;保护&lt;strong&gt;关键链路&lt;/strong&gt;——核心业务和边缘业务用不同资源池&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;一套完整的流量治理方案，&lt;strong&gt;四者都要有&lt;/strong&gt;。只做限流的系统遇到下游慢调用一样会死；只做熔断的系统遇到突发流量一样会死。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="12-雪崩效应分布式系统的心肌梗塞"&gt;1.2 雪崩效应：分布式系统的&amp;quot;心肌梗塞&amp;quot;
+&lt;/h3&gt;&lt;p&gt;雪崩的本质是&lt;strong&gt;资源耗尽的级联反应&lt;/strong&gt;。在一个有 100 个微服务的系统里，任意一个下游服务变慢 5 倍，都可能拖垮整条链路：&lt;/p&gt;
+&lt;pre class="mermaid" style="visibility:hidden"&gt;graph LR
+ A[网关] --&gt; B[订单服务]
+ B --&gt; C[库存服务]
+ B --&gt; D[用户服务]
+ C --&gt; E[Redis 集群]
+
+ E -.热点抖动.-&gt; F((P99 飙升))
+ F -.线程耗尽.-&gt; C
+ C -.超时.-&gt; B
+ B -.线程耗尽.-&gt; A
+ A -.健康检查失败.-&gt; G((整链路雪崩))
+
+ style F fill:#ffb4b4
+ style G fill:#e63946,color:#fff&lt;/pre&gt;&lt;p&gt;雪崩的核心特征：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;传染性&lt;/strong&gt;：故障从最末端的存储一路传到入口&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;非对称性&lt;/strong&gt;：下游慢一倍，上游可能死十倍（因为重试 + 等待 + 线程堆积放大了影响）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;自加速&lt;/strong&gt;：被打挂的节点会让健康节点承担更多流量，加速崩溃&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="13-流量治理的-4-大场景"&gt;1.3 流量治理的 4 大场景
+&lt;/h3&gt;&lt;p&gt;实战中流量治理覆盖 4 类典型场景，每类对应不同的策略：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;场景&lt;/th&gt;
+					&lt;th&gt;策略&lt;/th&gt;
+					&lt;th&gt;关键参数&lt;/th&gt;
+					&lt;th&gt;典型案例&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;突发流量保护&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;限流 + 排队&lt;/td&gt;
+					&lt;td&gt;QPS / Warm Up 系数&lt;/td&gt;
+					&lt;td&gt;秒杀、抢券、明星生日&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;下游故障隔离&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;熔断 + 半开探测&lt;/td&gt;
+					&lt;td&gt;错误率 / 慢调用比例&lt;/td&gt;
+					&lt;td&gt;Redis 抖动、DB 慢查询&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;关键资源保护&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;系统自适应保护&lt;/td&gt;
+					&lt;td&gt;Load / CPU / RT&lt;/td&gt;
+					&lt;td&gt;大促全站、618/双11&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;热点参数倾斜&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;热点限流&lt;/td&gt;
+					&lt;td&gt;参数维度 + QPS&lt;/td&gt;
+					&lt;td&gt;商品页 / 红包 / 直播间&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;📌 &lt;strong&gt;实践：4 大场景的优先级&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;资源有限时按以下顺序建设：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;限流&lt;/strong&gt;（性价比最高，1 周搞定）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;熔断&lt;/strong&gt;（防止下游传染，2 周搞定）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;系统自适应保护&lt;/strong&gt;（兜底大招，1 周配规则）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;热点参数限流&lt;/strong&gt;（精细化运营，按业务上）&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;顺序错了会很难受。曾见某团队先做了热点限流，结果普通流量限流没做，618 第一天就被秒杀直接干挂。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="二选型史从-hystrix-到-sentinel"&gt;二、选型史：从 Hystrix 到 Sentinel
+&lt;/h2&gt;&lt;p&gt;要回答&amp;quot;凭什么选 Sentinel&amp;quot;，先看 Java 生态的流量治理工具演化史。&lt;/p&gt;
+&lt;h3 id="21-工具演进时间线"&gt;2.1 工具演进时间线
+&lt;/h3&gt;&lt;pre class="mermaid" style="visibility:hidden"&gt;graph LR
+ A[2012&lt;br/&gt;Hystrix&lt;br/&gt;Netflix 开源] --&gt; B[2017&lt;br/&gt;Resilience4j&lt;br/&gt;函数式重构]
+ B --&gt; C[2018&lt;br/&gt;Sentinel&lt;br/&gt;阿里开源]
+ C --&gt; D[2018-11&lt;br/&gt;Hystrix&lt;br/&gt;停止维护]
+ D --&gt; E[2019&lt;br/&gt;Sentinel Cluster&lt;br/&gt;集群限流]
+ E --&gt; F[2020+&lt;br/&gt;Service Mesh&lt;br/&gt;下沉到 Sidecar]
+
+ style A fill:#a8dadc
+ style C fill:#457b9d,color:#fff
+ style E fill:#457b9d,color:#fff
+ style D fill:#ffb4b4&lt;/pre&gt;&lt;h3 id="22-hystrix开创者"&gt;2.2 Hystrix：开创者
+&lt;/h3&gt;&lt;p&gt;Netflix 2012 年开源，是熔断器模式的工业级开山之作。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;核心设计&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;线程池隔离&lt;/strong&gt;：每个下游依赖一个独立线程池，调用走异步&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;熔断器三态机&lt;/strong&gt;：CLOSED（正常）→ OPEN（熔断）→ HALF_OPEN（半开探测）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;失败回调&lt;/strong&gt;：通过 &lt;code&gt;getFallback()&lt;/code&gt; 实现降级&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;致命缺陷&lt;/strong&gt;（导致 2018 年被废弃）：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;线程池切换成本高&lt;/strong&gt;：每个依赖都开线程池，几十个下游就要几十个池，&lt;strong&gt;纯开销占 CPU 5%-10%&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;API 侵入性强&lt;/strong&gt;：必须继承 &lt;code&gt;HystrixCommand&lt;/code&gt; 或 &lt;code&gt;HystrixObservableCommand&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;规则修改要重启&lt;/strong&gt;：动态配置能力差，规则改完要重新发布&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;维护停滞&lt;/strong&gt;：Netflix 2018 年宣布&amp;quot;维护模式&amp;quot;，不再增加新特性&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="23-resilience4j函数式继承者"&gt;2.3 Resilience4j：函数式继承者
+&lt;/h3&gt;&lt;p&gt;2017 年作为&amp;quot;Hystrix 的现代化替代&amp;quot;出现，由前 Hystrix 团队成员主导。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;核心改进&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;函数式编程风格&lt;/strong&gt;：&lt;code&gt;Decorators.ofSupplier(supplier).withCircuitBreaker(cb).decorate()&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;轻量级&lt;/strong&gt;：不强制线程池隔离，可选信号量&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;模块化&lt;/strong&gt;：限流 / 熔断 / 重试 / 缓存 / 隔离 各自独立 JAR&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;短板&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;无开箱即用控制台&lt;/strong&gt;：要自己接 Micrometer + Grafana&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;动态规则要二次开发&lt;/strong&gt;：默认配置在 YAML，运行时改要写代码&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;国内生态弱&lt;/strong&gt;：中文文档少、社区问答少&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;集群限流&lt;/strong&gt;：原生不支持，要配合 Bucket4j 等第三方&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="24-sentinel阿里实战派"&gt;2.4 Sentinel：阿里实战派
+&lt;/h3&gt;&lt;p&gt;阿里 2018 年开源，&lt;strong&gt;核心技术经过历年双 11 的实战验证&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;核心特色&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;资源 + 规则解耦&lt;/strong&gt;：用 &lt;code&gt;@SentinelResource&lt;/code&gt; 标注资源，规则在控制台改&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;完整功能矩阵&lt;/strong&gt;：流控 / 熔断 / 系统自适应 / 热点 / 授权 五大模块&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;官方 Dashboard&lt;/strong&gt;：开箱即用的 Web 控制台&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;生态完整&lt;/strong&gt;：Spring Cloud Alibaba 一行依赖搞定集成&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;集群限流&lt;/strong&gt;：原生支持 Token Server 模式&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;多语言扩展&lt;/strong&gt;：Go / C++ / Rust 也有官方版本&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="25-sentinel-cluster集群限流"&gt;2.5 Sentinel Cluster：集群限流
+&lt;/h3&gt;&lt;p&gt;单机限流的痛点：QPS 阈值难定。设大了所有节点都打满，设小了浪费资源。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Sentinel Cluster 解决方案&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;用 Token Server 集中发放令牌&lt;/li&gt;
+&lt;li&gt;所有节点的 QPS 加总不超过总阈值&lt;/li&gt;
+&lt;li&gt;支持 Embedded（嵌入业务进程）和 Alone（独立部署）两种模式&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre class="mermaid" style="visibility:hidden"&gt;graph TD
+ A[请求] --&gt; B[Sentinel Client]
+ B --&gt; C{获取 Token}
+ C --&gt;|本机有令牌| D[直接放行]
+ C --&gt;|本机无令牌| E[请求 Token Server]
+ E --&gt; F{全局令牌池}
+ F --&gt;|分配成功| D
+ F --&gt;|池已空| G[限流拒绝]
+
+ style F fill:#457b9d,color:#fff&lt;/pre&gt;&lt;h3 id="26-五维对比表"&gt;2.6 五维对比表
+&lt;/h3&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;维度&lt;/th&gt;
+					&lt;th&gt;Hystrix&lt;/th&gt;
+					&lt;th&gt;Resilience4j&lt;/th&gt;
+					&lt;th&gt;Sentinel&lt;/th&gt;
+					&lt;th&gt;Sentinel Cluster&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;限流维度&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;不支持（只熔断）&lt;/td&gt;
+					&lt;td&gt;QPS / 并发&lt;/td&gt;
+					&lt;td&gt;QPS / 并发 / 热点参数&lt;/td&gt;
+					&lt;td&gt;全局 QPS&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;熔断策略&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;错误率&lt;/td&gt;
+					&lt;td&gt;错误率 / 慢调用 / 异常数&lt;/td&gt;
+					&lt;td&gt;错误率 / 慢调用 / 异常数&lt;/td&gt;
+					&lt;td&gt;同左&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;隔离方式&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;线程池 / 信号量&lt;/td&gt;
+					&lt;td&gt;信号量为主&lt;/td&gt;
+					&lt;td&gt;信号量为主&lt;/td&gt;
+					&lt;td&gt;同左&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;动态规则&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;弱（要重启）&lt;/td&gt;
+					&lt;td&gt;弱（要二开）&lt;/td&gt;
+					&lt;td&gt;&lt;strong&gt;强&lt;/strong&gt;（Dashboard 实时推）&lt;/td&gt;
+					&lt;td&gt;强&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;控制台&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;无官方（自研 Dashboard）&lt;/td&gt;
+					&lt;td&gt;无官方（接 Grafana）&lt;/td&gt;
+					&lt;td&gt;&lt;strong&gt;官方 Dashboard&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;同左&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;规则持久化&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;无&lt;/td&gt;
+					&lt;td&gt;无&lt;/td&gt;
+					&lt;td&gt;Nacos / Apollo / ZK 多选&lt;/td&gt;
+					&lt;td&gt;同左&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;生态集成&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;Spring Cloud Netflix（已停）&lt;/td&gt;
+					&lt;td&gt;Spring Cloud 通用&lt;/td&gt;
+					&lt;td&gt;&lt;strong&gt;Spring Cloud Alibaba&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;同左&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;国内文档&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;少&lt;/td&gt;
+					&lt;td&gt;少&lt;/td&gt;
+					&lt;td&gt;&lt;strong&gt;丰富&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;丰富&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;维护状态&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;&lt;strong&gt;停滞&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;活跃&lt;/td&gt;
+					&lt;td&gt;&lt;strong&gt;活跃&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;活跃&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;典型用户&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;历史项目&lt;/td&gt;
+					&lt;td&gt;海外团队&lt;/td&gt;
+					&lt;td&gt;&lt;strong&gt;国内大厂&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;国内大厂&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;💡 &lt;strong&gt;原理：选型的本质是&amp;quot;控制力&amp;quot;vs&amp;quot;灵活性&amp;quot;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Hystrix 时代要写代码控制规则，灵活但难运维；Sentinel 把规则抽到 Dashboard，&lt;strong&gt;业务方可以不改代码调阈值&lt;/strong&gt;，运维友好但要部署一套控制平面。&lt;/p&gt;
+&lt;p&gt;当你的团队规模 &amp;lt; 5 人、规则不常改时，&lt;strong&gt;Resilience4j 的轻量是优势&lt;/strong&gt;。团队规模 &amp;gt; 20 人、规则要按场景动态调时，&lt;strong&gt;Sentinel 的 Dashboard 是刚需&lt;/strong&gt;。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="27-选型决策树"&gt;2.7 选型决策树
+&lt;/h3&gt;&lt;pre class="mermaid" style="visibility:hidden"&gt;graph TD
+ A{团队技术栈} --&gt;|Spring Cloud Netflix 历史项目| B[Hystrix → 计划替换]
+ A --&gt;|Spring Cloud 通用 / 海外项目| C{需要控制台?}
+ A --&gt;|Spring Cloud Alibaba / 国内项目| D[Sentinel]
+
+ C --&gt;|需要| D
+ C --&gt;|不需要 / 自己接 Grafana| E[Resilience4j]
+
+ D --&gt;|单机 QPS 够用| F[Sentinel 单机模式]
+ D --&gt;|需全局 QPS 控制| G[Sentinel Cluster]
+
+ style D fill:#457b9d,color:#fff
+ style F fill:#a8dadc
+ style G fill:#a8dadc&lt;/pre&gt;&lt;h2 id="三为什么选-sentinel5-大理由"&gt;三、为什么选 Sentinel：5 大理由
+&lt;/h2&gt;&lt;p&gt;收口选型，Sentinel 在 Java 微服务场景下值得选的 5 个理由：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;实战出身&lt;/strong&gt;：阿里双 11 历年验证，&lt;strong&gt;单机峰值 10 万 QPS&lt;/strong&gt; 下规则生效稳定&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;功能完整&lt;/strong&gt;：流控 / 熔断 / 系统自适应 / 热点 / 授权 五大模块，无需拼第三方&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;运维友好&lt;/strong&gt;：官方 Dashboard 开箱即用，规则改完实时生效&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;生态闭环&lt;/strong&gt;：Spring Cloud Alibaba 一行依赖完成 Nacos + Sentinel + Seata 集成&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;持续演进&lt;/strong&gt;：阿里中间件团队主力维护，&lt;strong&gt;每年 4-6 个版本迭代&lt;/strong&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;🛑 &lt;strong&gt;误区警示&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&amp;ldquo;&lt;strong&gt;Sentinel 是阿里的，不用阿里云就不能用&lt;/strong&gt;&amp;quot;——这是常见误判。
+Sentinel 是 Apache 2.0 协议的纯开源项目，&lt;strong&gt;和阿里云无任何绑定&lt;/strong&gt;。Dashboard 可以部署在任何 Linux 机器上，规则可以存到任何 Nacos / Apollo / ZK 集群里。&lt;/p&gt;
+&lt;p&gt;实际国内中小厂用 Sentinel 的占比 &amp;gt; 60%，远高于阿里云用户占比。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="四sentinel-怎么用从接入到精细化"&gt;四、Sentinel 怎么用：从接入到精细化
+&lt;/h2&gt;&lt;p&gt;这是本文最核心的部分。Sentinel 的使用分 7 步走：&lt;strong&gt;架构总览 → 接入依赖 → 资源定义 → 规则配置 → 持久化 → Dashboard → 网关集成&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="41-架构总览三件套"&gt;4.1 架构总览：三件套
+&lt;/h3&gt;&lt;p&gt;Sentinel 的生产架构由三部分组成：&lt;/p&gt;
+&lt;pre class="mermaid" style="visibility:hidden"&gt;graph TD
+ subgraph 业务进程
+ A[Spring Boot App] --&gt; B[Sentinel Client SDK]
+ end
+
+ subgraph 控制平面
+ C[Sentinel Dashboard] --&gt;|推规则| B
+ B --&gt;|上报指标| C
+ end
+
+ subgraph 配置中心
+ D[Nacos] &lt;--&gt;|规则持久化| C
+ D --&gt;|拉规则| B
+ end
+
+ style C fill:#457b9d,color:#fff
+ style D fill:#a8dadc&lt;/pre&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Sentinel Client&lt;/strong&gt;：嵌入业务进程的 SDK，负责拦截调用、统计、按规则放行/拒绝&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Sentinel Dashboard&lt;/strong&gt;：独立部署的 Web 控制台，看监控、配规则&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Nacos&lt;/strong&gt;（或 Apollo / ZK）：规则持久化存储，Dashboard 重启 / Client 重启都能恢复&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="42-接入依赖"&gt;4.2 接入依赖
+&lt;/h3&gt;&lt;p&gt;基于 Spring Cloud Alibaba 的接入只需一行依赖：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-xml" data-lang="xml"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;&amp;lt;!-- 选当前最新稳定版本，2026 年常用 2.2.x 系列 --&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;&amp;lt;dependency&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nt"&gt;&amp;lt;groupId&amp;gt;&lt;/span&gt;com.alibaba.cloud&lt;span class="nt"&gt;&amp;lt;/groupId&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nt"&gt;&amp;lt;artifactId&amp;gt;&lt;/span&gt;spring-cloud-starter-alibaba-sentinel&lt;span class="nt"&gt;&amp;lt;/artifactId&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;&amp;lt;/dependency&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c"&gt;&amp;lt;!-- 规则持久化到 Nacos（推荐） --&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;&amp;lt;dependency&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nt"&gt;&amp;lt;groupId&amp;gt;&lt;/span&gt;com.alibaba.csp&lt;span class="nt"&gt;&amp;lt;/groupId&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nt"&gt;&amp;lt;artifactId&amp;gt;&lt;/span&gt;sentinel-datasource-nacos&lt;span class="nt"&gt;&amp;lt;/artifactId&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;&amp;lt;/dependency&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;application.yml 配置：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;span class="lnt"&gt;18
+&lt;/span&gt;&lt;span class="lnt"&gt;19
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-yaml" data-lang="yaml"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;spring&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;cloud&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;sentinel&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;transport&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;dashboard&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;127.0.0.1&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;8080&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;# Dashboard 地址&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;port&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;8719&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;# Client 监听端口（Dashboard 拉指标用）&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;datasource&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;flow&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;# 流控规则&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;nacos&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;server-addr&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;127.0.0.1&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;8848&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;data-id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;${spring.application.name}-flow-rules&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;group-id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;SENTINEL_GROUP&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;rule-type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;flow&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;degrade&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;# 熔断规则&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;nacos&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;server-addr&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;127.0.0.1&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;8848&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;data-id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;${spring.application.name}-degrade-rules&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;group-id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;SENTINEL_GROUP&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;rule-type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;degrade&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="43-资源定义sentinelresource"&gt;4.3 资源定义：@SentinelResource
+&lt;/h3&gt;&lt;p&gt;Sentinel 把&amp;quot;被保护的代码段&amp;quot;称为&lt;strong&gt;资源&lt;/strong&gt;，用注解或 API 标识。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;span class="lnt"&gt;15
+&lt;/span&gt;&lt;span class="lnt"&gt;16
+&lt;/span&gt;&lt;span class="lnt"&gt;17
+&lt;/span&gt;&lt;span class="lnt"&gt;18
+&lt;/span&gt;&lt;span class="lnt"&gt;19
+&lt;/span&gt;&lt;span class="lnt"&gt;20
+&lt;/span&gt;&lt;span class="lnt"&gt;21
+&lt;/span&gt;&lt;span class="lnt"&gt;22
+&lt;/span&gt;&lt;span class="lnt"&gt;23
+&lt;/span&gt;&lt;span class="lnt"&gt;24
+&lt;/span&gt;&lt;span class="lnt"&gt;25
+&lt;/span&gt;&lt;span class="lnt"&gt;26
+&lt;/span&gt;&lt;span class="lnt"&gt;27
+&lt;/span&gt;&lt;span class="lnt"&gt;28
+&lt;/span&gt;&lt;span class="lnt"&gt;29
+&lt;/span&gt;&lt;span class="lnt"&gt;30
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nd"&gt;@RestController&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nd"&gt;@RequestMapping&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;/order&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;OrderController&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nd"&gt;@Autowired&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;private&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;InventoryClient&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;inventoryClient&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nd"&gt;@PostMapping&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;/create&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nd"&gt;@SentinelResource&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;value&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;#34;createOrder&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 资源名&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;blockHandler&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;#34;createOrderBlocked&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 被限流/熔断时的处理&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;fallback&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;#34;createOrderFallback&amp;#34;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 业务异常时的降级&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;OrderResult&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;create&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nd"&gt;@RequestBody&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;OrderReq&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;req&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 主业务逻辑&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Inventory&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;inv&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;inventoryClient&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;deduct&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;req&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getSkuId&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;req&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getQty&lt;/span&gt;&lt;span class="p"&gt;());&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;orderService&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;save&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;inv&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 被流控/熔断规则拦截时调用&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;OrderResult&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;createOrderBlocked&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;OrderReq&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;BlockException&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ex&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;OrderResult&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;fail&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;当前下单人数过多，请稍后再试&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 业务方法抛异常时调用&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;OrderResult&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;createOrderFallback&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;OrderReq&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Throwable&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ex&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;log&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;createOrder fallback, reason={}&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;());&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;OrderResult&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;fail&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;系统繁忙，订单已记录后续重试&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;🎯 &lt;strong&gt;避坑点：blockHandler vs fallback&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;这俩很容易混：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;blockHandler&lt;/strong&gt;：被 Sentinel 规则拦截时调用，参数末尾必须是 &lt;code&gt;BlockException&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;fallback&lt;/strong&gt;：业务代码抛任意异常时调用，参数末尾必须是 &lt;code&gt;Throwable&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;同时配两个，且业务真抛异常时，&lt;strong&gt;fallback 优先级高于 blockHandler&lt;/strong&gt;。规则拦截时只走 blockHandler。&lt;/p&gt;
+&lt;p&gt;实战推荐：&lt;strong&gt;两个都写&lt;/strong&gt;。blockHandler 用于流量异常时的友好提示；fallback 用于业务真挂了时的兜底（如查询本地缓存）。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="44-五大功能详解"&gt;4.4 五大功能详解
+&lt;/h3&gt;&lt;h4 id="441-流量控制限流"&gt;4.4.1 流量控制（限流）
+&lt;/h4&gt;&lt;p&gt;按 QPS 或线程数限流，是最常用的规则类型。&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;阈值类型&lt;/th&gt;
+					&lt;th&gt;触发条件&lt;/th&gt;
+					&lt;th&gt;适用场景&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;QPS&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;每秒请求数 &amp;gt; 阈值&lt;/td&gt;
+					&lt;td&gt;突发流量保护（最常用）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;并发线程数&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;同时执行的请求 &amp;gt; 阈值&lt;/td&gt;
+					&lt;td&gt;慢调用保护（如 DB 操作）&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;strong&gt;控制效果&lt;/strong&gt;有三种：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;控制效果&lt;/th&gt;
+					&lt;th&gt;行为&lt;/th&gt;
+					&lt;th&gt;适用&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;快速失败&lt;/strong&gt;（默认）&lt;/td&gt;
+					&lt;td&gt;超阈值直接拒绝&lt;/td&gt;
+					&lt;td&gt;接口型服务&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;Warm Up&lt;/strong&gt;（预热）&lt;/td&gt;
+					&lt;td&gt;阈值随时间线性增长&lt;/td&gt;
+					&lt;td&gt;冷启动后突发流量（如缓存预热）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;排队等待&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;超阈值进队列，匀速处理&lt;/td&gt;
+					&lt;td&gt;异步任务、消息消费&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;代码示例（手动注册规则，生产环境一般走 Dashboard）：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;FlowRule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;FlowRule&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setResource&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;createOrder&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setGrade&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;RuleConstant&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;FLOW_GRADE_QPS&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;1000&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// QPS 阈值 1000&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setControlBehavior&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;RuleConstant&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;CONTROL_BEHAVIOR_WARM_UP&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setWarmUpPeriodSec&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;10&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 10 秒内预热到阈值&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;FlowRuleManager&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;loadRules&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Collections&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;singletonList&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="442-熔断降级"&gt;4.4.2 熔断降级
+&lt;/h4&gt;&lt;p&gt;下游服务异常时短路调用，避免线程堆积。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Sentinel 1.8+ 提供三种熔断策略&lt;/strong&gt;：&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;策略&lt;/th&gt;
+					&lt;th&gt;触发条件&lt;/th&gt;
+					&lt;th&gt;推荐场景&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;慢调用比例&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;慢调用比例 &amp;gt; 阈值（默认 0.5）&lt;/td&gt;
+					&lt;td&gt;下游慢但不挂（最常用）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;异常比例&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;错误率 &amp;gt; 阈值&lt;/td&gt;
+					&lt;td&gt;下游高错误率&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;异常数&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;错误数 &amp;gt; 阈值（绝对值）&lt;/td&gt;
+					&lt;td&gt;调用量小的接口&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;strong&gt;熔断器三态机&lt;/strong&gt;：&lt;/p&gt;
+&lt;pre class="mermaid" style="visibility:hidden"&gt;stateDiagram-v2
+ [*] --&gt; CLOSED: 启动
+ CLOSED --&gt; OPEN: 触发熔断条件
+ OPEN --&gt; HALF_OPEN: 熔断时长到期
+ HALF_OPEN --&gt; CLOSED: 探测成功
+ HALF_OPEN --&gt; OPEN: 探测失败
+
+ note right of CLOSED: 正常调用&lt;br/&gt;持续统计指标
+ note right of OPEN: 直接走 fallback&lt;br/&gt;不调用下游
+ note right of HALF_OPEN: 放行 1 个请求&lt;br/&gt;看结果&lt;/pre&gt;&lt;p&gt;规则示例：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;span class="lnt"&gt;9
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;DegradeRule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;DegradeRule&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setResource&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;inventoryClient:deduct&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setGrade&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;RuleConstant&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;DEGRADE_GRADE_RT&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 慢调用比例策略&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;200&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 响应时间阈值 200ms&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setSlowRatioThreshold&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;0&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;5&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 慢调用比例 &amp;gt; 50%&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setMinRequestAmount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;20&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 统计窗口最小请求数&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setStatIntervalMs&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;10000&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 统计窗口 10 秒&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setTimeWindow&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;5&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 熔断 5 秒后试探&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;DegradeRuleManager&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;loadRules&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Collections&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;singletonList&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="443-系统自适应保护"&gt;4.4.3 系统自适应保护
+&lt;/h4&gt;&lt;p&gt;按机器整体负载（Load、CPU、入口 QPS、平均 RT）做兜底保护。&lt;strong&gt;这是大促级流量的最后一道防线&lt;/strong&gt;。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;SystemRule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;SystemRule&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setHighestSystemLoad&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;8&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;0&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 触发条件：Load1 &amp;gt; 8&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setHighestCpuUsage&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;0&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;8&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 或 CPU &amp;gt; 80%&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setAvgRt&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;500&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 或平均 RT &amp;gt; 500ms&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setMaxThread&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;800&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 或并发线程 &amp;gt; 800&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setQps&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;20000&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 或入口 QPS &amp;gt; 20000&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;SystemRuleManager&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;loadRules&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Collections&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;singletonList&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;📌 &lt;strong&gt;实践：系统保护是大促必备&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;单接口限流再准，遇到全站慢就失灵——总流量没超，但 CPU/Load 已经爆了。
+&lt;strong&gt;系统自适应保护按机器整体状态拒绝请求&lt;/strong&gt;，是不依赖业务规则的兜底。&lt;/p&gt;
+&lt;p&gt;大促前必配，阈值参考：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Load1 上限 = CPU 核数 × 2&lt;/li&gt;
+&lt;li&gt;CPU 上限 80%&lt;/li&gt;
+&lt;li&gt;平均 RT 上限 = 业务 P99 × 1.5&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;
+&lt;h4 id="444-热点参数限流"&gt;4.4.4 热点参数限流
+&lt;/h4&gt;&lt;p&gt;某些场景下，&lt;strong&gt;同一个接口的不同参数值流量差异巨大&lt;/strong&gt;。比如商品详情接口，99% 的流量来自 1% 的热门商品。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nd"&gt;@GetMapping&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;/item/{id}&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nd"&gt;@SentinelResource&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;value&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;#34;getItem&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;blockHandler&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;#34;getItemBlocked&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Item&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;getItem&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nd"&gt;@PathVariable&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Long&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;id&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;itemService&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;findById&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;id&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;规则配置：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;span class="lnt"&gt;7
+&lt;/span&gt;&lt;span class="lnt"&gt;8
+&lt;/span&gt;&lt;span class="lnt"&gt;9
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;ParamFlowRule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ParamFlowRule&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;getItem&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setParamIdx&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;0&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 第 0 个参数（id）&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;100&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 单参数值 QPS 默认上限&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;ParamFlowItem&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;hotItem&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ParamFlowItem&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;hotItem&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setObject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;9527&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 商品 ID 9527&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;hotItem&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setClassType&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;class&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getName&lt;/span&gt;&lt;span class="p"&gt;());&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;hotItem&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;1000&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 热门商品单独阈值 1000&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setParamFlowItemList&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Collections&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;singletonList&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;hotItem&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;ParamFlowRuleManager&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;loadRules&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Collections&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;singletonList&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;💡 &lt;strong&gt;原理：热点参数限流为什么不能用普通限流&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;假设 getItem 总 QPS 上限 10 万，正常时 99% 是热门商品 9527 的请求。
+此时一波恶意爬虫扫遍所有商品 ID（每个 ID 1 QPS），&lt;strong&gt;总 QPS 没超&lt;/strong&gt;但&lt;strong&gt;热门商品 9527 的容量被冷门 ID 挤占了&lt;/strong&gt;，正常用户被拒绝。&lt;/p&gt;
+&lt;p&gt;热点参数限流按&amp;quot;参数值&amp;quot;维度统计 QPS，&lt;strong&gt;独立给热门商品分配配额&lt;/strong&gt;，避免被冷门商品挤占。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h4 id="445-黑白名单授权"&gt;4.4.5 黑白名单（授权）
+&lt;/h4&gt;&lt;p&gt;按调用方身份允许 / 拒绝。常用于 BFF 网关层。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;AuthorityRule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;AuthorityRule&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setResource&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;inventoryService:deduct&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setLimitApp&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;orderService,couponService&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 允许列表&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setStrategy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;RuleConstant&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;AUTHORITY_WHITE&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// WHITE / BLACK&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;AuthorityRuleManager&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;loadRules&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Collections&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;singletonList&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;调用方身份从 RPC 框架的上下文里取（Dubbo 取 application name、Spring Cloud 取请求头里的 &lt;code&gt;S-User&lt;/code&gt;），需配 &lt;code&gt;RequestOriginParser&lt;/code&gt;。&lt;/p&gt;
+&lt;h3 id="45-规则持久化必须做的事"&gt;4.5 规则持久化：必须做的事
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;Sentinel 默认规则存在内存里，Client 重启就没了&lt;/strong&gt;。生产环境必须把规则持久化到外部存储。&lt;/p&gt;
+&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;方案&lt;/th&gt;
+					&lt;th&gt;模式&lt;/th&gt;
+					&lt;th&gt;优缺点&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;Pull 模式&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;Client 定时拉&lt;/td&gt;
+					&lt;td&gt;简单但有延迟（默认 30 秒）&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;Push 模式&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;配置中心推&lt;/td&gt;
+					&lt;td&gt;实时但要选 Nacos / Apollo / ZK&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;strong&gt;Spring Cloud Alibaba 推荐 Nacos Push 模式&lt;/strong&gt;，配置如 4.2 节所示。规则存到 Nacos 后：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Dashboard 改规则 → 写 Nacos → Nacos 推送给所有 Client → 实时生效&lt;/li&gt;
+&lt;li&gt;Client 重启 → 从 Nacos 拉一次 → 规则不丢&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;🎯 &lt;strong&gt;避坑点：规则丢失的元凶&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;不配持久化的后果：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;重启即失效&lt;/strong&gt;：Client 重启或扩容新节点，规则消失&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;新节点裸奔&lt;/strong&gt;：扩容期间新节点没规则，流量直接打到下游&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Dashboard 显示假象&lt;/strong&gt;：Dashboard 显示规则存在（其实存在 Dashboard 内存里），但 Client 实际没生效&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;&lt;strong&gt;上生产前的最后一道 Check：模拟重启一台 Client，规则还在不？&lt;/strong&gt;&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="46-dashboard-部署"&gt;4.6 Dashboard 部署
+&lt;/h3&gt;&lt;p&gt;Dashboard 是个 Spring Boot Jar 包，部署简单：&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 下载（替换为当前版本号）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;wget https://github.com/alibaba/Sentinel/releases/download/&amp;lt;version&amp;gt;/sentinel-dashboard-&amp;lt;version&amp;gt;.jar
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 启动（生产环境务必加用户密码）&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;java -Dserver.port&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="m"&gt;8080&lt;/span&gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -Dcsp.sentinel.dashboard.server&lt;span class="o"&gt;=&lt;/span&gt;localhost:8080 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -Dproject.name&lt;span class="o"&gt;=&lt;/span&gt;sentinel-dashboard &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -Dsentinel.dashboard.auth.username&lt;span class="o"&gt;=&lt;/span&gt;admin &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -Dsentinel.dashboard.auth.password&lt;span class="o"&gt;=&lt;/span&gt;YourStrongPass &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -jar sentinel-dashboard-&amp;lt;version&amp;gt;.jar
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;🛑 &lt;strong&gt;误区警示&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Dashboard 改规则默认只写到自己内存里&lt;/strong&gt;——不会自动同步到 Nacos。
+要做到&amp;quot;Dashboard 改 → Nacos 持久化 → 推给所有 Client&amp;rdquo;，必须&lt;strong&gt;改 Dashboard 源码&lt;/strong&gt;或用社区改造版（如 nepxion-discovery 提供的整合版）。&lt;/p&gt;
+&lt;p&gt;这是 Sentinel 官方一直没解决的痛点。生产推荐：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;短期：用社区改造版 Dashboard&lt;/li&gt;
+&lt;li&gt;长期：自研规则配置后台（直接对接 Nacos），Dashboard 仅做监控查看&lt;/li&gt;
+&lt;/ol&gt;
+
+ &lt;/blockquote&gt;
+&lt;h3 id="47-spring-cloud-gateway-集成网关层限流"&gt;4.7 Spring Cloud Gateway 集成：网关层限流
+&lt;/h3&gt;&lt;p&gt;把限流前置到网关层，能在更早的环节拦住异常流量。&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-xml" data-lang="xml"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;&amp;lt;dependency&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nt"&gt;&amp;lt;groupId&amp;gt;&lt;/span&gt;com.alibaba.cloud&lt;span class="nt"&gt;&amp;lt;/groupId&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nt"&gt;&amp;lt;artifactId&amp;gt;&lt;/span&gt;spring-cloud-alibaba-sentinel-gateway&lt;span class="nt"&gt;&amp;lt;/artifactId&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;&amp;lt;/dependency&amp;gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-yaml" data-lang="yaml"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;spring&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;cloud&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;sentinel&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;enabled&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;# 关掉默认 servlet 过滤器&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;scg&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;fallback&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;mode&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="l"&gt;response&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;response-status&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;429&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;response-body&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s1"&gt;&amp;#39;{&amp;#34;code&amp;#34;:429,&amp;#34;msg&amp;#34;:&amp;#34;too many requests&amp;#34;}&amp;#39;&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nd"&gt;@Configuration&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;SentinelGatewayConfig&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nd"&gt;@PostConstruct&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;initRules&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Set&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;GatewayFlowRule&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;rules&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;HashSet&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;GatewayFlowRule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;GatewayFlowRule&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;order-service&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// 路由 ID&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;2000&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setIntervalSec&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;1&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;rules&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;rule&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;GatewayRuleManager&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;loadRules&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;rules&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h3 id="48-openfeign-集成消费者侧熔断"&gt;4.8 OpenFeign 集成：消费者侧熔断
+&lt;/h3&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-yaml" data-lang="yaml"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nt"&gt;feign&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;sentinel&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;enabled&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;span class="lnt"&gt;11
+&lt;/span&gt;&lt;span class="lnt"&gt;12
+&lt;/span&gt;&lt;span class="lnt"&gt;13
+&lt;/span&gt;&lt;span class="lnt"&gt;14
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-java" data-lang="java"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nd"&gt;@FeignClient&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;#34;inventory-service&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;fallback&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;InventoryFallback&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;class&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;interface&lt;/span&gt; &lt;span class="nc"&gt;InventoryClient&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nd"&gt;@PostMapping&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;/inventory/deduct&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Inventory&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;deduct&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nd"&gt;@RequestParam&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Long&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;skuId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nd"&gt;@RequestParam&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;qty&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nd"&gt;@Component&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;InventoryFallback&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;implements&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;InventoryClient&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nd"&gt;@Override&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;public&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Inventory&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;deduct&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Long&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;skuId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;qty&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;log&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;warn&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;#34;inventory deduct fallback, skuId={}&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;skuId&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Inventory&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="na"&gt;unavailable&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h2 id="五真实案例"&gt;五、真实案例
+&lt;/h2&gt;&lt;h3 id="51-阿里双-11-系统自适应保护"&gt;5.1 阿里：双 11 系统自适应保护
+&lt;/h3&gt;&lt;p&gt;阿里电商核心链路用 Sentinel 多年，&lt;strong&gt;双 11 零点峰值的兜底就是系统自适应保护&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;入口 QPS 阈值按机器规模动态调整&lt;/li&gt;
+&lt;li&gt;当 Load1 &amp;gt; 阈值时，按 BBR 算法自适应拒绝流量&lt;/li&gt;
+&lt;li&gt;配合预案系统：高优先级业务（下单 / 支付）继续放行，低优先级（详情 / 推荐）先拒绝&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;阿里的核心实践：&amp;quot;&lt;strong&gt;规则不是拍出来的，是压测出来的&lt;/strong&gt;&amp;quot;——每年双 11 前 2 个月开始全链路压测，每条规则都对应一次压测结论。&lt;/p&gt;
+&lt;h3 id="52-美团sentinel--自研规则中心"&gt;5.2 美团：Sentinel + 自研规则中心
+&lt;/h3&gt;&lt;p&gt;美团没用官方 Dashboard，而是把 Sentinel 接入自研的统一规则中心 OCTO：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;规则按业务维度组织（不只按服务）&lt;/li&gt;
+&lt;li&gt;一键灰度（5% / 20% / 50% / 100%）&lt;/li&gt;
+&lt;li&gt;规则变更走审批流，关键服务需 SRE 双签&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;教训：&amp;quot;&lt;strong&gt;Sentinel 官方 Dashboard 适合开发自测，不适合大规模生产运营&lt;/strong&gt;&amp;quot;。中大厂建议早做自研规则中心。&lt;/p&gt;
+&lt;h3 id="53-中小厂spring-cloud-alibaba-直接落地"&gt;5.3 中小厂：Spring Cloud Alibaba 直接落地
+&lt;/h3&gt;&lt;p&gt;20-50 人技术团队的典型用法：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Nacos（注册中心 + 配置中心 + Sentinel 规则）一套搞定&lt;/li&gt;
+&lt;li&gt;官方 Dashboard 改造版（加上 Nacos 双写）&lt;/li&gt;
+&lt;li&gt;规则按&amp;quot;接口 + 环境&amp;quot;组织&lt;/li&gt;
+&lt;li&gt;灰度通过 Nacos 的 namespace 区分&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;性价比拉满，&lt;strong&gt;3 天可上线、1 周稳定运行&lt;/strong&gt;。&lt;/p&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;💡 &lt;strong&gt;原理：选型规模档&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;5 人以下&lt;/strong&gt;：Sentinel 单机模式 + 内存规则（先跑起来）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;5-50 人&lt;/strong&gt;：Sentinel + Nacos 持久化 + 官方 Dashboard&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;50-200 人&lt;/strong&gt;：Sentinel + 自研规则中心（解决多业务线 / 灰度 / 审批）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;200 人以上&lt;/strong&gt;：Sentinel 作为 Mesh Sidecar 的一部分（流控下沉到基础设施）&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="六总结"&gt;六、总结
+&lt;/h2&gt;&lt;h3 id="61-流量治理的-3-大核心要素"&gt;6.1 流量治理的 3 大核心要素
+&lt;/h3&gt;&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;资源识别&lt;/strong&gt;：每个对外接口、每个下游依赖，都要打 &lt;code&gt;@SentinelResource&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;规则配置&lt;/strong&gt;：限流 / 熔断 / 系统自适应 三类规则都要有&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;持久化 + 实时推送&lt;/strong&gt;：规则必须存 Nacos，重启不丢、变更秒级生效&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h3 id="62-何时不该上-sentinel"&gt;6.2 何时&lt;strong&gt;不&lt;/strong&gt;该上 Sentinel
+&lt;/h3&gt;&lt;table&gt;
+	&lt;thead&gt;
+			&lt;tr&gt;
+					&lt;th&gt;场景&lt;/th&gt;
+					&lt;th&gt;推荐&lt;/th&gt;
+			&lt;/tr&gt;
+	&lt;/thead&gt;
+	&lt;tbody&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;单体应用、QPS &amp;lt; 100&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;不需要，加几个简单的限流注解或自己写计数器即可&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;海外团队、Spring Cloud Netflix&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;Resilience4j 生态更顺&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;Service Mesh 架构（Istio 全量）&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;Envoy 自带流控，Sentinel 部分重复&lt;/td&gt;
+			&lt;/tr&gt;
+			&lt;tr&gt;
+					&lt;td&gt;&lt;strong&gt;PoC / Demo&lt;/strong&gt;&lt;/td&gt;
+					&lt;td&gt;任何工具都行，不要为了 Sentinel 而 Sentinel&lt;/td&gt;
+			&lt;/tr&gt;
+	&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3 id="63-常见陷阱"&gt;6.3 常见陷阱
+&lt;/h3&gt;
+ &lt;blockquote&gt;
+ &lt;p&gt;🛑 &lt;strong&gt;误区警示：这些坑别踩&lt;/strong&gt;&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;规则不持久化&lt;/strong&gt;：重启即失效，扩容即裸奔&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;blockHandler / fallback 用错&lt;/strong&gt;：两者职责混淆，关键时不生效&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;只配限流不配熔断&lt;/strong&gt;：突发流量过了，但下游故障传染没解决&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;阈值拍脑袋&lt;/strong&gt;：没压测就上规则，要么误伤要么不生效&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;不监控规则变化&lt;/strong&gt;：规则被误改无人发现&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Dashboard 暴露公网&lt;/strong&gt;：默认无 HTTPS，规则被恶意改&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;&lt;strong&gt;Sentinel 是工具，规则才是核心&lt;/strong&gt;。工具用 1 天就会，规则要持续运营。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;📌 &lt;strong&gt;实践：流量治理的成本&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;流量治理是&lt;strong&gt;持续投入&lt;/strong&gt;，不是一次性建设：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;初始建设&lt;/strong&gt;：1-2 周（接入 + Dashboard + Nacos）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;规则梳理&lt;/strong&gt;：每个核心接口 0.5 天压测 + 配规则&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;持续维护&lt;/strong&gt;：每季度复盘规则有效性，新接口必须配规则才能上线&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;演练&lt;/strong&gt;：每月手动触发一次限流 / 熔断，验证规则生效&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;投入产出比：&lt;strong&gt;一次大促故障的损失 = 5 年的流量治理人力投入&lt;/strong&gt;。值得。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="七sentinel-实施清单"&gt;七、Sentinel 实施清单
+&lt;/h2&gt;&lt;p&gt;按以下清单逐项检查，可以少踩很多坑。&lt;/p&gt;
+&lt;h3 id="71-评估层-checklist"&gt;7.1 评估层 Checklist
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;业务分级&lt;/strong&gt;：明确哪些接口是 P0 / P1 / P2，决定保护粒度&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;流量画像&lt;/strong&gt;：核心接口的日 / 周 / 月 QPS 曲线，P99 响应时间&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;依赖梳理&lt;/strong&gt;：每个服务的下游依赖清单（DB / Redis / RPC / HTTP）&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;历史故障&lt;/strong&gt;：过去 1 年的故障 Root Cause，对应到限流 / 熔断场景&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;预算评估&lt;/strong&gt;：Dashboard 服务器 + Nacos 服务器 + 人力（首期 1 周）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="72-接入层-checklist"&gt;7.2 接入层 Checklist
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;依赖统一&lt;/strong&gt;：所有服务用同一个 Spring Cloud Alibaba 版本（避免兼容问题）&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;基础注解&lt;/strong&gt;：所有 Controller 接口加 &lt;code&gt;@SentinelResource&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;降级方法&lt;/strong&gt;：每个资源都有 blockHandler + fallback&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;OpenFeign 接入&lt;/strong&gt;：所有 Feign Client 加 &lt;code&gt;fallback&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;网关接入&lt;/strong&gt;：网关层加 sentinel-gateway，限流前置&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;本地测试&lt;/strong&gt;：单机跑通限流 / 熔断 / 降级三类场景&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="73-规则层-checklist"&gt;7.3 规则层 Checklist
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;限流规则&lt;/strong&gt;：核心接口都配 QPS 限流，阈值由压测得出&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;熔断规则&lt;/strong&gt;：所有 RPC / HTTP 调用都配熔断（慢调用比例策略最常用）&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;系统保护&lt;/strong&gt;：所有机器都配系统自适应规则&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;热点参数&lt;/strong&gt;：商品 / 用户等可能热点倾斜的接口配热点限流&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;规则持久化&lt;/strong&gt;：Nacos 中规则文件命名规范统一&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;规则版本&lt;/strong&gt;：Nacos 中规则按版本管理，可回滚&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="74-监控层-checklist"&gt;7.4 监控层 Checklist
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;Dashboard 实时监控&lt;/strong&gt;：QPS / 拒绝量 / 异常数实时可看&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;接 Prometheus&lt;/strong&gt;：Sentinel metrics 导出到 Prometheus + Grafana&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;告警规则&lt;/strong&gt;：拒绝量 &amp;gt; 阈值 → 告警；熔断打开 → 告警&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;业务大盘&lt;/strong&gt;：核心业务流量 / 拒绝率 / 熔断状态在大盘上&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;规则变更审计&lt;/strong&gt;：所有规则修改有人 / 时间 / 内容记录&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="75-运维层-checklist"&gt;7.5 运维层 Checklist
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;Dashboard 高可用&lt;/strong&gt;：至少 2 台部署 + 反向代理&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;Dashboard 鉴权&lt;/strong&gt;：必须配用户密码，不能裸奔&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;Dashboard 内网&lt;/strong&gt;：不暴露公网，VPN 访问&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;Nacos 高可用&lt;/strong&gt;：至少 3 节点集群&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;规则备份&lt;/strong&gt;：Nacos 规则每日备份&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;演练机制&lt;/strong&gt;：每月一次&amp;quot;主动触发熔断&amp;quot;演练&lt;/li&gt;
+&lt;li&gt;&lt;input disabled="" type="checkbox"&gt; &lt;strong&gt;Runbook&lt;/strong&gt;：每个核心服务有&amp;quot;流量治理 Runbook&amp;quot;&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;🎯 &lt;strong&gt;避坑点：80/20 法则&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;上面 30+ 项检查，&lt;strong&gt;80% 的事故栽在前 10 项&lt;/strong&gt;：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;业务分级不清晰&lt;/li&gt;
+&lt;li&gt;接口没全部加注解&lt;/li&gt;
+&lt;li&gt;没配 blockHandler / fallback&lt;/li&gt;
+&lt;li&gt;规则没持久化&lt;/li&gt;
+&lt;li&gt;Dashboard 没鉴权&lt;/li&gt;
+&lt;li&gt;阈值拍脑袋&lt;/li&gt;
+&lt;li&gt;没接监控&lt;/li&gt;
+&lt;li&gt;没配告警&lt;/li&gt;
+&lt;li&gt;没做演练&lt;/li&gt;
+&lt;li&gt;Runbook 是摆设&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;&lt;strong&gt;先把前 10 项做好，再考虑剩下的&lt;/strong&gt;。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="八常见问题-faq"&gt;八、常见问题 FAQ
+&lt;/h2&gt;&lt;h3 id="q1从-hystrix-迁移到-sentinel-难吗"&gt;Q1：从 Hystrix 迁移到 Sentinel 难吗？
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;A&lt;/strong&gt;：&lt;strong&gt;不难，但工作量不小&lt;/strong&gt;。主要工作：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;替换依赖（去掉 Hystrix 相关，加 Sentinel）&lt;/li&gt;
+&lt;li&gt;把 &lt;code&gt;@HystrixCommand&lt;/code&gt; 改为 &lt;code&gt;@SentinelResource&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;把 &lt;code&gt;getFallback()&lt;/code&gt; 拆为 &lt;code&gt;blockHandler&lt;/code&gt; + &lt;code&gt;fallback&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;规则从 YAML 移到 Nacos&lt;/li&gt;
+&lt;li&gt;Dashboard 切换&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;中等规模项目（50 个服务）迁移工期约 4-6 周，可分批进行。&lt;/p&gt;
+&lt;h3 id="q2sentinel-规则修改后多久生效"&gt;Q2：Sentinel 规则修改后多久生效？
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;A&lt;/strong&gt;：&lt;strong&gt;取决于持久化方案&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;内存规则（不推荐）：立即生效，但重启即失效&lt;/li&gt;
+&lt;li&gt;Nacos Push：&amp;lt; 1 秒&lt;/li&gt;
+&lt;li&gt;自定义 Pull：默认 30 秒&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;生产环境用 Nacos Push，&lt;strong&gt;改完控制台到所有节点生效平均 200-500ms&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="q3sentinel-性能开销大吗"&gt;Q3：Sentinel 性能开销大吗？
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;A&lt;/strong&gt;：&lt;strong&gt;很小&lt;/strong&gt;。官方压测数据：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;单机 10 万 QPS 场景下，CPU 开销 &amp;lt; 1%&lt;/li&gt;
+&lt;li&gt;内存开销：每个资源 ~2KB&lt;/li&gt;
+&lt;li&gt;调用延迟增加：&amp;lt; 0.1ms&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;性能开销主要来自滑动窗口统计，&lt;strong&gt;比 Hystrix 的线程池切换轻 10 倍&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3 id="q4service-mesh-时代-sentinel-还有用吗"&gt;Q4：Service Mesh 时代 Sentinel 还有用吗？
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;A&lt;/strong&gt;：&lt;strong&gt;有用，但角色变化&lt;/strong&gt;。&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;小规模团队&lt;/strong&gt;：Sentinel 仍是流量治理的主力&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;全量 Service Mesh 团队&lt;/strong&gt;：基础限流下沉到 Envoy，&lt;strong&gt;Sentinel 转向业务级精细化场景&lt;/strong&gt;（热点参数 / 业务规则）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;混合架构&lt;/strong&gt;（最常见）：Sentinel 在业务进程内做精细控制，Mesh 在基础设施层做粗粒度&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Sentinel 团队也在做 &lt;strong&gt;sentinel-mesh-sidecar&lt;/strong&gt;，把 Sentinel 能力下沉到 Envoy。未来 1-2 年这个方向会更清晰。&lt;/p&gt;
+&lt;h3 id="q5sentinel-和限流算法令牌桶--漏桶是什么关系"&gt;Q5：Sentinel 和限流算法（令牌桶 / 漏桶）是什么关系？
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;A&lt;/strong&gt;：&lt;strong&gt;Sentinel 是工具，限流算法是其内核&lt;/strong&gt;。Sentinel 内置：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;滑动窗口&lt;/strong&gt;：默认 QPS 统计算法，时间窗口内累积计数&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;漏桶&lt;/strong&gt;：排队等待模式（匀速放行）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;令牌桶&lt;/strong&gt;：Warm Up 模式（预热阶段类似令牌桶）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;你不需要选择算法，Sentinel 自动按规则类型用最合适的算法。&lt;/p&gt;
+&lt;h3 id="q6sentinel-cluster-部署复杂吗"&gt;Q6：Sentinel Cluster 部署复杂吗？
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;A&lt;/strong&gt;：&lt;strong&gt;比单机复杂，要考虑 Token Server 高可用&lt;/strong&gt;。&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Embedded 模式&lt;/strong&gt;：Token Server 嵌入业务进程（选一台业务节点充当）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Alone 模式&lt;/strong&gt;：Token Server 独立部署（推荐）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Alone 模式需要：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Token Server 至少 2 台部署 + Failover&lt;/li&gt;
+&lt;li&gt;Token Server 故障时降级为单机限流（避免雪崩）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;仅当确实需要全局 QPS 控制时才上 Cluster&lt;/strong&gt;，能用单机就用单机。&lt;/p&gt;
+&lt;h3 id="q7规则配在哪里更合理代码--nacos--自研后台"&gt;Q7：规则配在哪里更合理：代码 / Nacos / 自研后台？
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;A&lt;/strong&gt;：&lt;strong&gt;按团队规模选&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;5 人以下&lt;/strong&gt;：代码里写规则（启动时加载）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;5-50 人&lt;/strong&gt;：Nacos 存规则 + 官方 Dashboard 改&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;50-200 人&lt;/strong&gt;：Nacos 存规则 + 自研后台改（带审批 / 灰度 / 回滚）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;200 人以上&lt;/strong&gt;：规则平台化（多租户 / 多环境 / API 化）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;早期不要追求大而全&lt;/strong&gt;，能跑就行；规模上来再演进。&lt;/p&gt;
+&lt;h3 id="q8sentinel-报错-clusterservercommandhandler-not-found-怎么办"&gt;Q8：Sentinel 报错 &amp;ldquo;ClusterServerCommandHandler not found&amp;rdquo; 怎么办？
+&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;A&lt;/strong&gt;：典型的版本兼容问题。检查：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Spring Cloud Alibaba 版本 vs Sentinel Core 版本要对齐（参考阿里官方版本对照表）&lt;/li&gt;
+&lt;li&gt;同一服务里所有 Sentinel 相关依赖必须同版本&lt;/li&gt;
+&lt;li&gt;IDE 里看 Maven 依赖树，排查传递依赖冲突&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;90% 的兼容性问题用 &lt;strong&gt;dependencyManagement 锁定 Spring Cloud Alibaba 版本&lt;/strong&gt;就能解决。&lt;/p&gt;
+&lt;h2 id="九推荐阅读"&gt;九、推荐阅读
+&lt;/h2&gt;&lt;p&gt;如果想深入 Sentinel 与流量治理，以下资料值得一读：&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;官方资料&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Sentinel 官方文档（中英文）：&lt;a class="link" href="https://sentinelguard.io/" target="_blank" rel="noopener"
+ &gt;https://sentinelguard.io/&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;Sentinel GitHub Wiki：&lt;a class="link" href="https://github.com/alibaba/Sentinel/wiki" target="_blank" rel="noopener"
+ &gt;https://github.com/alibaba/Sentinel/wiki&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;Spring Cloud Alibaba 官方文档&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;书籍&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;《微服务架构设计模式》（Chris Richardson）—— 第 4 章讲弹性与故障处理&lt;/li&gt;
+&lt;li&gt;《Release It!》（Michael Nygard）—— 熔断器模式的开山之作，必读&lt;/li&gt;
+&lt;li&gt;《从 Paxos 到 Zookeeper》—— 理解规则持久化背后的分布式一致性&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;技术博客&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;阿里中间件团队：Sentinel 历年双 11 实战&lt;/li&gt;
+&lt;li&gt;美团技术团队：流量治理与稳定性建设&lt;/li&gt;
+&lt;li&gt;字节跳动技术博客：Service Mesh 时代的流量治理&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;开源项目&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Sentinel：&lt;a class="link" href="https://github.com/alibaba/Sentinel" target="_blank" rel="noopener"
+ &gt;https://github.com/alibaba/Sentinel&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;Sentinel Dashboard 改造版（社区）：nepxion-discovery&lt;/li&gt;
+&lt;li&gt;Resilience4j（对比参考）：&lt;a class="link" href="https://resilience4j.readme.io/" target="_blank" rel="noopener"
+ &gt;https://resilience4j.readme.io/&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;Hystrix（已停维护，仅作历史参考）&lt;/li&gt;
+&lt;/ul&gt;
+
+ &lt;blockquote&gt;
+ &lt;p&gt;💡 &lt;strong&gt;学习路径建议&lt;/strong&gt;&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;入门&lt;/strong&gt;：本文 + Sentinel 官方 Quick Start，3 天能跑通基础接入&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;进阶&lt;/strong&gt;：阿里中间件博客的双 11 系列，理解工业实践&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;实战&lt;/strong&gt;：用一个真实项目接入 Sentinel + Nacos，做一次压测验证规则&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;深潜&lt;/strong&gt;：读 Sentinel 源码（建议从 &lt;code&gt;Sph.entry()&lt;/code&gt; 入口往下追），理解滑动窗口、规则匹配、Slot Chain&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;&lt;strong&gt;理论 + 实践 + 源码&lt;/strong&gt;，缺一不可。&lt;/p&gt;
+
+ &lt;/blockquote&gt;
+&lt;h2 id="参考文章"&gt;参考文章
+&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/alibaba/Sentinel/wiki" target="_blank" rel="noopener"
+ &gt;Sentinel 官方仓库 - Wiki&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://github.com/alibaba/spring-cloud-alibaba" target="_blank" rel="noopener"
+ &gt;Spring Cloud Alibaba 官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://developer.aliyun.com/article/740335" target="_blank" rel="noopener"
+ &gt;阿里云开发者社区 - Sentinel 实战&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>
